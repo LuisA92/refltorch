@@ -6,17 +6,22 @@ readme = "README.md"
 authors = [
     { name = "Luis Aldama", email = "luisaldama@icloud.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "ipython>=9.9.0",
+    "matplotlib>=3.10.8",
     "numpy>=2.4.1",
     "pandas>=2.3.3",
     "plotly>=6.5.1",
     "polars>=1.37.0",
     "reciprocalspaceship>=1.0.7",
     "seaborn>=0.13.2",
-    "torch>=2.9.1",
-    "torchvision>=0.24.1",
+]
+
+[project.optional-dependencies]
+torch = [
+  "torch>=2.2",
+  "torchvision>=0.17",
 ]
 
 [project.scripts]
@@ -25,3 +30,16 @@ refltorch = "refltorch:main"
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'", extra = "torch" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'", extra = "torch" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
