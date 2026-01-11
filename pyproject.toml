@@ -1,0 +1,27 @@
+[project]
+name = "refltorch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Luis Aldama", email = "luisaldama@icloud.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ipython>=9.9.0",
+    "numpy>=2.4.1",
+    "pandas>=2.3.3",
+    "plotly>=6.5.1",
+    "polars>=1.37.0",
+    "reciprocalspaceship>=1.0.7",
+    "seaborn>=0.13.2",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+]
+
+[project.scripts]
+refltorch = "refltorch:main"
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
