@@ -12,13 +12,14 @@ micromamba create -n refltorch \
   python=3.11 \
   dials \
   pytorch
+
 micromamba activate refltorch
 
-# clone repo and go into project directory
+# CLone the repository
 git clone https://github.com/LuisA92/refltorch.git
 cd refltorch
 
-# install project
+# Install uv and install project
 pip install uv
 uv pip install -e .
 
@@ -32,17 +33,17 @@ uv pip install -e .
 micromamba create -n refltorch python=3.11
 micromamba activate refltorch
 
-# install dials
+# Install DIALS
 micromamba install -c conda-forge dials
 
-# clone repo and go into project directory
+# Clone the repository
 git clone https://github.com/LuisA92/refltorch.git
 cd refltorch
 
-# install project
+# Install uv and install project
 pip install uv
 uv pip install -e .
 
-# install PyTorch
-
 ```
+
+

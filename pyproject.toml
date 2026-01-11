@@ -19,9 +19,6 @@ dependencies = [
 ]
 
 
-[project.scripts]
-refltorch = "refltorch:main"
-
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
@@ -32,6 +29,7 @@ cu128 = [
   "torch>=2.9.1",
   "torchvision>=0.24.1",
 ]
+
 
 [tool.uv.sources]
 torch = [
