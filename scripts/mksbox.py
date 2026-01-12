@@ -254,7 +254,7 @@ def process_block(
     else:
         dtype = np.float32
 
-    shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[any_z].dtype)
+    shoeboxes = np.zeros((n, dz, dy, dx), dtype=dtype)
     mask = np.zeros((n, dz, dy, dx), dtype=bool)
 
     for i, idx in enumerate(block_indices):
