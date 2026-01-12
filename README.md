@@ -6,7 +6,7 @@ If using macOS, install DIALS and PyTorch using micromamba or conda.
 
 ```bash
 
-# create new micromamba environment and install DIALS and PyTorch
+# Create micromamba environment and install DIALS and PyTorch
 micromamba create -n refltorch \
   -c conda-forge \
   python=3.11 \
@@ -42,10 +42,6 @@ cd refltorch
 
 # Install uv and install project
 pip install uv
-uv pip install -e .
+uv pip install -e .[cu128]
 
 ```
-
-
-
-#

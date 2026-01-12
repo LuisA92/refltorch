@@ -131,9 +131,75 @@ def run_all_blocks(
     return results
 
 
+# def process_block(
+#     block_indices,
+#     bboxes,
+#     panels,
+#     refl_ids,
+#     expt_path,
+#     dz,
+#     dy,
+#     dx,
+# ):
+#     import numpy as np
+#     from dxtbx.model.experiment_list import ExperimentListFactory
+#
+#     experiments = ExperimentListFactory.from_json_file(expt_path)
+#     imageset = experiments[0].imageset
+#
+#     block_bboxes = bboxes[block_indices]
+#     z0_block = int(block_bboxes[:, 4].min())
+#     z1_block = int(block_bboxes[:, 5].max())
+#
+#     images = {}
+#
+#     for z in range(z0_block, z1_block):
+#         raw = imageset.get_raw_data(z)[0]  # flex array
+#         images[z] = raw.as_numpy_array()  # 2D numpy
+#
+#     n = len(block_indices)
+#     shoeboxes = np.zeros(
+#         (n, dz, dy, dx),
+#         dtype=images[z0_block].dtype,
+#     )
+#     mask = np.zeros((n, dz, dy, dx), dtype=bool)
+#
+#     for i, idx in enumerate(block_indices):
+#         x0, x1, y0, y1, z0, z1 = bboxes[idx]
+#
+#         z0_full = z0 - (dz - (z1 - z0)) // 2
+#         y0_full = y0 - (dy - (y1 - y0)) // 2
+#         x0_full = x0 - (dx - (x1 - x0)) // 2
+#
+#         oz0 = z0 - z0_full
+#         oy0 = y0 - y0_full
+#         ox0 = x0 - x0_full
+#
+#         for zz in range(z0, z1):
+#             img = images[zz]
+#             dz_idx = oz0 + (zz - z0)
+#
+#             shoeboxes[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = img[
+#                 y0:y1, x0:x1
+#             ]
+#
+#             mask[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = True
+#
+#     imageset.clear_cache()
+#     shoeboxes = shoeboxes.reshape(shoeboxes.shape[0], dz * dy * dx)
+#     mask = mask.reshape(mask.shape[0], dz * dy * dx)
+#
+#     return {
+#         "shoeboxes": shoeboxes,
+#         "mask": mask,
+#         "refl_ids": refl_ids[block_indices],
+#     }
+#
+
+
 def process_block(
     block_indices,
-    bboxes,
+    bboxes_full,  # IMPORTANT: these are FULL boxes, may go out of bounds
     panels,
     refl_ids,
     expt_path,
@@ -147,47 +213,66 @@ def process_block(
     experiments = ExperimentListFactory.from_json_file(expt_path)
     imageset = experiments[0].imageset
 
-    block_bboxes = bboxes[block_indices]
-    z0_block = int(block_bboxes[:, 4].min())
-    z1_block = int(block_bboxes[:, 5].max())
+    # detector size (single-panel assumption here; extend if multi-panel)
+    det = imageset.get_detector()[0]
+    dx_det, dy_det = det.get_image_size()
 
+    block_boxes = bboxes_full[block_indices]
+    z0_block = int(block_boxes[:, 4].min())
+    z1_block = int(block_boxes[:, 5].max())
+
+    # preload images + masks for needed z
     images = {}
+    detmasks = {}
 
     for z in range(z0_block, z1_block):
-        raw = imageset.get_raw_data(z)[0]  # flex array
-        images[z] = raw.as_numpy_array()  # 2D numpy
+        raw = imageset.get_raw_data(z)[0]
+        images[z] = raw.as_numpy_array()
+
+        m = imageset.get_mask(z)[0]
+        detmasks[z] = m.as_numpy_array().astype(bool)
 
     n = len(block_indices)
-    shoeboxes = np.zeros(
-        (n, dz, dy, dx),
-        dtype=images[z0_block].dtype,
-    )
+    shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[z0_block].dtype)
     mask = np.zeros((n, dz, dy, dx), dtype=bool)
 
     for i, idx in enumerate(block_indices):
-        x0, x1, y0, y1, z0, z1 = bboxes[idx]
+        x0f, x1f, y0f, y1f, z0f, z1f = bboxes_full[idx]
 
-        z0_full = z0 - (dz - (z1 - z0)) // 2
-        y0_full = y0 - (dy - (y1 - y0)) // 2
-        x0_full = x0 - (dx - (x1 - x0)) // 2
+        # destination is always [0:dx), [0:dy), [0:dz)
+        # source is [x0f:x1f), etc, but may go out of bounds
 
-        oz0 = z0 - z0_full
-        oy0 = y0 - y0_full
-        ox0 = x0 - x0_full
+        for zz in range(z0f, z1f):
+            if zz not in images:
+                continue
 
-        for zz in range(z0, z1):
+            # clip source range to detector bounds
+            xs0 = max(0, x0f)
+            xs1 = min(dx_det, x1f)
+            ys0 = max(0, y0f)
+            ys1 = min(dy_det, y1f)
+
+            if xs0 >= xs1 or ys0 >= ys1:
+                continue
+
+            # destination offsets (where clipped source lands inside the full box)
+            xd0 = xs0 - x0f
+            yd0 = ys0 - y0f
+            zd = zz - z0f
+
             img = images[zz]
-            dz_idx = oz0 + (zz - z0)
+            dm = detmasks[zz]
 
-            shoeboxes[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = img[
-                y0:y1, x0:x1
-            ]
+            patch = img[ys0:ys1, xs0:xs1]
+            good = dm[ys0:ys1, xs0:xs1]
 
-            mask[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = True
+            shoeboxes[i, zd, yd0 : yd0 + (ys1 - ys0), xd0 : xd0 + (xs1 - xs0)] = patch
+            mask[i, zd, yd0 : yd0 + (ys1 - ys0), xd0 : xd0 + (xs1 - xs0)] = good
 
     imageset.clear_cache()
-    shoeboxes = shoeboxes.reshape(shoeboxes.shape[0], dz * dy * dx)
-    mask = mask.reshape(mask.shape[0], dz * dy * dx)
+
+    shoeboxes = shoeboxes.reshape(n, dz * dy * dx)
+    mask = mask.reshape(n, dz * dy * dx)
 
     return {
         "shoeboxes": shoeboxes,
