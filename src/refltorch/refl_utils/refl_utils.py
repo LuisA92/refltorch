@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import reciprocalspaceship as rs
+import reciprocalspaceship.io as io
 import torch
 
 SCALAR_DTYPES = {
@@ -55,10 +56,11 @@ def refl_as_pt(
     out_dir: str | None = None,
     out_fname: str = "metadata.pt",
 ) -> dict:
-    ds = rs.io.read_dials_stills(
+    ds = io.read_dials_stills(
         refl,
         extra_cols=column_names,
     )
+    assert isinstance(ds, rs.DataSet)
 
     data = {}
     for k, v in ds.items():
