@@ -483,7 +483,6 @@ def main():
         dz=dz,
         dy=dy,
         dx=dx,
-        max_workers=35,
     )
 
     # aggregate results
