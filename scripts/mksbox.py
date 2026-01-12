@@ -485,7 +485,7 @@ def main():
             masks_fname=args.masks_fname,
         )
         # save metadata.pt file
-        refl_as_pt(refl=reflections, out_dir=args.out_dir)
+        refl_as_pt(refl=refl_fname.as_posix(), out_dir=args.out_dir)
 
 
 if __name__ == "__main__":
