@@ -1,3 +1,18 @@
+"""
+Run with the following command:
+'''bash
+python ../refltorch/scripts/mksbox.py \
+        --refl integrated.refl \
+        --expt integrated.expt \
+        --out-dir out_dir \
+        --w 21 \
+        --h 21 \
+        --d 3 \
+        --save-as-pt
+'''
+
+"""
+
 import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -19,6 +34,12 @@ def parse_args():
         "--refl",
         type=str,
         help="Path to the dials.refl file",
+    )
+    parser.add_argument(
+        "--refl-fname",
+        type=str,
+        default="reflections_.refl",
+        help="Filename of output reflection file",
     )
     parser.add_argument(
         "--expt",
@@ -485,18 +506,11 @@ def main():
             masks_fname=args.masks_fname,
         )
         # save metadata.pt file
-        refl_as_pt(refl=refl_fname.as_posix(), out_dir=args.out_dir)
+        refl_as_pt(
+            refl=refl_fname.as_posix(),
+            out_dir=args.out_dir,
+        )
 
 
 if __name__ == "__main__":
     main()
-
-"""
-python ../refltorch/scripts/mksbox.py \
-        --refl integrated.refl \
-        --expt integrated.expt \
-        --w 21 \
-        --h 21 \
-        --d 3 \
-        --save-as-pt
-"""

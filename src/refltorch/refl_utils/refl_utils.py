@@ -53,7 +53,8 @@ def refl_as_pt(
     column_names: list[str] = DEFAULT_REFL_COLS,
     excluded_columns: list[str] = DEFAULT_EXCLUDED_COLS,
     out_dir: str | None = None,
-):
+    out_fname: str = "metadata.pt",
+) -> dict:
     ds = rs.io.read_dials_stills(
         refl,
         extra_cols=column_names,
@@ -64,9 +65,11 @@ def refl_as_pt(
         if k not in excluded_columns:
             data[k] = torch.tensor(v, dtype=torch.float32)
 
+    # write to output directory if specified
     if out_dir is not None:
-        fname = Path(out_dir) / "metadata.pt"
+        fname = Path(out_dir) / out_fname
     else:
-        fname = "metadata.pt"
+        fname = out_fname
 
     torch.save(data, fname)
+    return data
