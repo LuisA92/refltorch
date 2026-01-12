@@ -225,12 +225,25 @@ def process_block(
     images = {}
     detmasks = {}
 
-    for z in range(z0_block, z1_block):
+    scan = imageset.get_scan()
+    frame0, frame1 = scan.get_array_range()
+
+    z_load0 = max(frame0, z0_block)
+    z_load1 = min(frame1, z1_block)
+
+    for z in range(z_load0, z_load1):
         raw = imageset.get_raw_data(z)[0]
         images[z] = raw.as_numpy_array()
 
         m = imageset.get_mask(z)[0]
         detmasks[z] = m.as_numpy_array().astype(bool)
+
+    # for z in range(z0_block, z1_block):
+    #     raw = imageset.get_raw_data(z)[0]
+    #     images[z] = raw.as_numpy_array()
+    #
+    #     m = imageset.get_mask(z)[0]
+    #     detmasks[z] = m.as_numpy_array().astype(bool)
 
     n = len(block_indices)
     # shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[z0_block].dtype)
