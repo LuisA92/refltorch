@@ -103,11 +103,9 @@ def run_all_blocks(
     dz,
     dy,
     dx,
-    max_workers=None,
 ):
-    if max_workers is None:
-        # CBF I/O is heavy; more workers is usually worse
-        max_workers = min(4, os.cpu_count())
+    cpu_count = os.cpu_count() or 1
+    max_workers = min(4, cpu_count)
 
     results = []
 
@@ -391,6 +389,7 @@ def main():
     reflections = flatten_reflections(
         params.input.reflections,
     )
+
     experiments = flatten_experiments(params.input.experiments)
 
     if not any([experiments, reflections]):
@@ -458,8 +457,14 @@ def main():
     block_ids = zc // BLOCK_SIZE
     reflections["block_ids"] = flex.int(block_ids)
 
-    # save a reflection file
+    # # save a reflection file
+    # refl_fname = Path(args.out_dir) / "reflections_test.refl"
+    # reflections.as_file(refl_fname)
+
+    # Save a copy, but restore original order first
+    perm = flex.sort_permutation(reflections["refl_ids"])
     refl_fname = Path(args.out_dir) / "reflections_test.refl"
+    reflections.reorder(perm)
     reflections.as_file(refl_fname)
 
     # Get blocks of block ids
