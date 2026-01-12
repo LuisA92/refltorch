@@ -168,7 +168,7 @@ def process_block(
 
     imageset.clear_cache()
     shoeboxes = shoeboxes.reshape(shoeboxes.shape[0], dz * dy * dx)
-    masks = mask.reshape(mask.shape[0], dz * dy * dx)
+    mask = mask.reshape(mask.shape[0], dz * dy * dx)
 
     return {
         "shoeboxes": shoeboxes,
@@ -490,3 +490,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python ../refltorch/scripts/mksbox.py \
+        --refl integrated.refl \
+        --expt integrated.expt \
+        --w 21 \
+        --h 21 \
+        --d 3 \
+        --save-as-pt
+"""
