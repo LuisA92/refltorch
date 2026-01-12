@@ -406,6 +406,8 @@ def _get_bounding_boxes(
 #     return bbox
 #
 #
+
+
 def _get_blocks(
     block_ids,
 ) -> list:
@@ -547,9 +549,9 @@ def main():
         z=z,
         params=params,
         reflections=reflections,
-        detector=detector,
-        frame0=frame0,
-        frame1=frame1,
+        # detector=detector,
+        # frame0=frame0,
+        # frame1=frame1,
     )
 
     # Store bboxes into reflection file
