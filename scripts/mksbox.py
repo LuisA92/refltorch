@@ -233,7 +233,9 @@ def process_block(
         detmasks[z] = m.as_numpy_array().astype(bool)
 
     n = len(block_indices)
-    shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[z0_block].dtype)
+    # shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[z0_block].dtype)
+    any_z = next(iter(images))
+    shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[any_z].dtype)
     mask = np.zeros((n, dz, dy, dx), dtype=bool)
 
     for i, idx in enumerate(block_indices):
@@ -264,10 +266,15 @@ def process_block(
             dm = detmasks[zz]
 
             patch = img[ys0:ys1, xs0:xs1]
-            good = dm[ys0:ys1, xs0:xs1]
+            dm_patch = dm[ys0:ys1, xs0:xs1]
 
-            shoeboxes[i, zd, yd0 : yd0 + (ys1 - ys0), xd0 : xd0 + (xs1 - xs0)] = patch
-            mask[i, zd, yd0 : yd0 + (ys1 - ys0), xd0 : xd0 + (xs1 - xs0)] = good
+            valid = (patch >= 0) & dm_patch
+
+            shoeboxes[i, zd, yd0 : yd0 + patch.shape[0], xd0 : xd0 + patch.shape[1]] = (
+                patch
+            )
+
+            mask[i, zd, yd0 : yd0 + patch.shape[0], xd0 : xd0 + patch.shape[1]] = valid
 
     imageset.clear_cache()
 
@@ -287,89 +294,118 @@ def _get_bounding_boxes(
     z,
     params,
     reflections,
-    detector,
-    frame0,
-    frame1,
 ):
+    """
+    Return FULL, CENTERED bounding boxes.
+    These boxes are NOT clipped to the detector or frame range.
+    Padding is handled later during extraction.
+    """
     bbox = flex.int6(len(reflections))
-    dx_det, dy_det = detector[0].get_image_size()
 
     for j, (_x, _y, _z) in enumerate(zip(x, y, z)):
-        # Calculate unclipped boundaries
-        x0_full = _x - params.nx
-        x1_full = _x + params.nx + 1
-        y0_full = _y - params.ny
-        y1_full = _y + params.ny + 1
-        z0_full = _z - params.nz
-        z1_full = _z + params.nz + 1
+        x0 = _x - params.nx
+        x1 = _x + params.nx + 1
 
-        # Calculate full dimensions
-        full_width_x = x1_full - x0_full
-        full_width_y = y1_full - y0_full
-        full_width_z = z1_full - z0_full
+        y0 = _y - params.ny
+        y1 = _y + params.ny + 1
 
-        # Check if any boundary is outside detector/frame and adjust
-        # X dimension adjustment
-        if x0_full < 0:
-            # Left edge is outside detector - shift right
-            x_shift = -x0_full  # Amount to shift right
-            x0 = 0
-            x1 = min(dx_det, x0 + full_width_x)  # Try to maintain width
-            # If still can't maintain full width, pad on left instead
-            if x1 - x0 < full_width_x:
-                x1 = min(dx_det, x0_full + full_width_x)
-        elif x1_full >= dx_det:
-            # Right edge is outside detector - shift left
-            x_shift = dx_det - x1_full  # Amount to shift left (negative)
-            x1 = dx_det
-            x0 = max(0, x1 - full_width_x)  # Try to maintain width
-            # If still can't maintain full width, pad on right instead
-            if x1 - x0 < full_width_x:
-                x0 = max(0, x1_full - full_width_x)
-        else:
-            # No adjustment needed
-            x0 = x0_full
-            x1 = x1_full
-
-        # Y dimension adjustment (similar to X)
-        if y0_full < 0:
-            y_shift = -y0_full
-            y0 = 0
-            y1 = min(dy_det, y0 + full_width_y)
-            if y1 - y0 < full_width_y:
-                y1 = min(dy_det, y0_full + full_width_y)
-        elif y1_full >= dy_det:
-            y_shift = dy_det - y1_full
-            y1 = dy_det
-            y0 = max(0, y1 - full_width_y)
-            if y1 - y0 < full_width_y:
-                y0 = max(0, y1_full - full_width_y)
-        else:
-            y0 = y0_full
-            y1 = y1_full
-
-        # Z dimension adjustment (similar to X and Y)
-        if z0_full < frame0:
-            z_shift = frame0 - z0_full
-            z0 = frame0
-            z1 = min(frame1, z0 + full_width_z)
-            if z1 - z0 < full_width_z:
-                z1 = min(frame1, z0_full + full_width_z)
-        elif z1_full >= frame1:
-            z_shift = frame1 - z1_full
-            z1 = frame1
-            z0 = max(frame0, z1 - full_width_z)
-            if z1 - z0 < full_width_z:
-                z0 = max(frame0, z1_full - full_width_z)
-        else:
-            z0 = z0_full
-            z1 = z1_full
+        z0 = _z - params.nz
+        z1 = _z + params.nz + 1
 
         bbox[j] = (x0, x1, y0, y1, z0, z1)
 
     return bbox
 
 
+# def _get_bounding_boxes(
+#     x,
+#     y,
+#     z,
+#     params,
+#     reflections,
+#     detector,
+#     frame0,
+#     frame1,
+# ):
+#     bbox = flex.int6(len(reflections))
+#     dx_det, dy_det = detector[0].get_image_size()
+#
+#     for j, (_x, _y, _z) in enumerate(zip(x, y, z)):
+#         # Calculate unclipped boundaries
+#         x0_full = _x - params.nx
+#         x1_full = _x + params.nx + 1
+#         y0_full = _y - params.ny
+#         y1_full = _y + params.ny + 1
+#         z0_full = _z - params.nz
+#         z1_full = _z + params.nz + 1
+#
+#         # Calculate full dimensions
+#         full_width_x = x1_full - x0_full
+#         full_width_y = y1_full - y0_full
+#         full_width_z = z1_full - z0_full
+#
+#         # Check if any boundary is outside detector/frame and adjust
+#         # X dimension adjustment
+#         if x0_full < 0:
+#             # Left edge is outside detector - shift right
+#             x_shift = -x0_full  # Amount to shift right
+#             x0 = 0
+#             x1 = min(dx_det, x0 + full_width_x)  # Try to maintain width
+#             # If still can't maintain full width, pad on left instead
+#             if x1 - x0 < full_width_x:
+#                 x1 = min(dx_det, x0_full + full_width_x)
+#         elif x1_full >= dx_det:
+#             # Right edge is outside detector - shift left
+#             x_shift = dx_det - x1_full  # Amount to shift left (negative)
+#             x1 = dx_det
+#             x0 = max(0, x1 - full_width_x)  # Try to maintain width
+#             # If still can't maintain full width, pad on right instead
+#             if x1 - x0 < full_width_x:
+#                 x0 = max(0, x1_full - full_width_x)
+#         else:
+#             # No adjustment needed
+#             x0 = x0_full
+#             x1 = x1_full
+#
+#         # Y dimension adjustment (similar to X)
+#         if y0_full < 0:
+#             y_shift = -y0_full
+#             y0 = 0
+#             y1 = min(dy_det, y0 + full_width_y)
+#             if y1 - y0 < full_width_y:
+#                 y1 = min(dy_det, y0_full + full_width_y)
+#         elif y1_full >= dy_det:
+#             y_shift = dy_det - y1_full
+#             y1 = dy_det
+#             y0 = max(0, y1 - full_width_y)
+#             if y1 - y0 < full_width_y:
+#                 y0 = max(0, y1_full - full_width_y)
+#         else:
+#             y0 = y0_full
+#             y1 = y1_full
+#
+#         # Z dimension adjustment (similar to X and Y)
+#         if z0_full < frame0:
+#             z_shift = frame0 - z0_full
+#             z0 = frame0
+#             z1 = min(frame1, z0 + full_width_z)
+#             if z1 - z0 < full_width_z:
+#                 z1 = min(frame1, z0_full + full_width_z)
+#         elif z1_full >= frame1:
+#             z_shift = frame1 - z1_full
+#             z1 = frame1
+#             z0 = max(frame0, z1 - full_width_z)
+#             if z1 - z0 < full_width_z:
+#                 z0 = max(frame0, z1_full - full_width_z)
+#         else:
+#             z0 = z0_full
+#             z1 = z1_full
+#
+#         bbox[j] = (x0, x1, y0, y1, z0, z1)
+#
+#     return bbox
+#
+#
 def _get_blocks(
     block_ids,
 ) -> list:
