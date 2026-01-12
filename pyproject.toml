@@ -15,7 +15,7 @@ dependencies = [
     "pandas>=2.3.3",
     "plotly>=6.5.1",
     "polars>=1.37.0",
-    "reciprocalspaceship>=1.0.7",
+    "reciprocalspaceship",
     "seaborn>=0.13.2",
 ]
 
@@ -40,6 +40,7 @@ torchvision = [
   { index = "pytorch-cu128", marker = "sys_platform == 'linux'", extra = "cu128" },
 ]
 cbf = { git = "https://github.com/paulscherrerinstitute/cbf.git" }
+reciprocalspaceship = { git = "https://github.com/LuisA92/reciprocalspaceship" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
