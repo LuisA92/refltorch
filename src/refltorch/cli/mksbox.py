@@ -567,6 +567,10 @@ def main():
     refl = data_dir / args.refl
     expt = data_dir / args.expt
 
+    # Writing out dir
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     # arguments and options
     params, options = parser.parse_args(
         [
@@ -649,7 +653,7 @@ def main():
 
     # Save a copy, but restore original order first
     perm = flex.sort_permutation(reflections["refl_ids"])
-    refl_fname = Path(args.out_dir) / "reflections_test.refl"
+    refl_fname = out_dir / "reflections_test.refl"
     reflections.reorder(perm)
     reflections.as_file(refl_fname)
 
