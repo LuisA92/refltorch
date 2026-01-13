@@ -2,10 +2,10 @@
 Run with the following command:
 '''bash
 refltorch.mksbox \
-        --data-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/dials \
+        --data-dir /n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/dials \
         --refl integrated.refl \
         --expt integrated.expt \
-        --out-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/out_dir \
+        --out-dir /n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/out_dir \
         --w 21 \
         --h 21 \
         --d 3 \
@@ -561,11 +561,15 @@ def main():
     else:
         raise ValueError(f"Depth must be an odd integer: d={args.d}")
 
+    data_dir = Path(args.data_dir)
+    refl = data_dir / args.refl
+    expt = data_dir / args.expt
+
     # arguments and options
     params, options = parser.parse_args(
         [
-            f"{args.refl}",
-            f"{args.expt}",
+            f"{refl}",
+            f"{expt}",
             f"nx={nx}",
             f"ny={ny}",
             f"nz={nz}",
@@ -613,9 +617,6 @@ def main():
         z=z,
         params=params,
         reflections=reflections,
-        # detector=detector,
-        # frame0=frame0,
-        # frame1=frame1,
     )
 
     # Store bboxes into reflection file
@@ -644,10 +645,6 @@ def main():
     block_ids = zc // BLOCK_SIZE
     reflections["block_ids"] = flex.int(block_ids)
 
-    # # save a reflection file
-    # refl_fname = Path(args.out_dir) / "reflections_test.refl"
-    # reflections.as_file(refl_fname)
-
     # Save a copy, but restore original order first
     perm = flex.sort_permutation(reflections["refl_ids"])
     refl_fname = Path(args.out_dir) / "reflections_test.refl"
@@ -666,7 +663,7 @@ def main():
         bboxes,
         panels,
         refl_ids,
-        expt_path="integrated.expt",
+        expt_path=expt,
         dz=dz,
         dy=dy,
         dx=dx,
