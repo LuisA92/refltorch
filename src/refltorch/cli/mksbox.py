@@ -1,10 +1,11 @@
 """
 Run with the following command:
 '''bash
-python ../refltorch/scripts/mksbox.py \
+refltorch.mksbox \
+        --data-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/dials \
         --refl integrated.refl \
         --expt integrated.expt \
-        --out-dir out_dir \
+        --out-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/out_dir \
         --w 21 \
         --h 21 \
         --d 3 \
@@ -28,7 +29,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Extract shoeboxes using dials.refl and dials.expt."
     )
-
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        help="Path to directory containing integrated.refl and integrated.expt files",
+    )
     parser.add_argument(
         "--refl",
         type=str,
