@@ -2,10 +2,9 @@
 Run with the following command:
 '''bash
 python ../refltorch/scripts/mksbox.py \
-        --data-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/dials \
         --refl integrated.refl \
         --expt integrated.expt \
-        --out-dir /n/hekstra_lab/people/aldama/data/hewl_9b7c/out_dir \
+        --out-dir out_dir \
         --w 21 \
         --h 21 \
         --d 3 \
@@ -21,7 +20,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from dials.array_family import flex
 
 from refltorch.refl_utils import refl_as_pt
 
@@ -30,11 +28,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Extract shoeboxes using dials.refl and dials.expt."
     )
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        help="Path to directory containing integrated.refl and integrated.expt files",
-    )
+
     parser.add_argument(
         "--refl",
         type=str,
@@ -284,7 +278,6 @@ def process_block(
             patch = img[ys0:ys1, xs0:xs1]
             dm_patch = dm[ys0:ys1, xs0:xs1]
 
-            # mask == True: real detector pixel AND not dead
             valid = (patch >= 0) & dm_patch
 
             shoeboxes[i, zd, yd0 : yd0 + patch.shape[0], xd0 : xd0 + patch.shape[1]] = (
@@ -510,6 +503,7 @@ def _save_stats(
 
 def main():
     import torch
+    from dials.array_family import flex
     from dials.util import Sorry
     from dials.util.options import (
         ArgumentParser,
@@ -533,13 +527,11 @@ def main():
       nz = 1
         .type = int(value_min=1)
         .help = "+/- z around centroid"
-
       output {
         reflections = 'shoeboxes.refl'
           .type = str
           .help = "The integrated output filename"
       }
-
     """
     )
 
@@ -564,15 +556,11 @@ def main():
     else:
         raise ValueError(f"Depth must be an odd integer: d={args.d}")
 
-    data_dir = Path(args.data_dir)
-    refl = data_dir / args.refl
-    expt = data_dir / args.expt
-
     # arguments and options
     params, options = parser.parse_args(
         [
-            f"{refl}",
-            f"{expt}",
+            f"{args.refl}",
+            f"{args.expt}",
             f"nx={nx}",
             f"ny={ny}",
             f"nz={nz}",
@@ -673,7 +661,7 @@ def main():
         bboxes,
         panels,
         refl_ids,
-        expt_path=expt,
+        expt_path="integrated.expt",
         dz=dz,
         dy=dy,
         dx=dx,
