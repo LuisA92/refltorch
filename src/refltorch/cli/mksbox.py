@@ -5,7 +5,7 @@ refltorch.mksbox \
         --data-dir /n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/dials \
         --refl integrated.refl \
         --expt integrated.expt \
-        --out-dir /n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/out_dir \
+        --out-dir /n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/pytorch_data \
         --w 21 \
         --h 21 \
         --d 3 \
@@ -651,7 +651,7 @@ def main():
 
     # Save a copy, but restore original order first
     perm = flex.sort_permutation(reflections["refl_ids"])
-    refl_fname = out_dir / "reflections_test.refl"
+    refl_fname = out_dir / args.refl_fname
     reflections.reorder(perm)
     reflections.as_file(refl_fname)
 
