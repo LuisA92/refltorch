@@ -238,15 +238,7 @@ def process_block(
         m = imageset.get_mask(z)[0]
         detmasks[z] = m.as_numpy_array().astype(bool)
 
-    # for z in range(z0_block, z1_block):
-    #     raw = imageset.get_raw_data(z)[0]
-    #     images[z] = raw.as_numpy_array()
-    #
-    #     m = imageset.get_mask(z)[0]
-    #     detmasks[z] = m.as_numpy_array().astype(bool)
-
     n = len(block_indices)
-    # shoeboxes = np.zeros((n, dz, dy, dx), dtype=images[z0_block].dtype)
 
     if images:
         any_z = next(iter(images))
@@ -462,6 +454,54 @@ def _save_as_pt(
     torch.save(masks, m)
 
 
+def anscombe_transform(
+    tensor: torch.Tensor,
+) -> torch.Tensor:
+    return 2 * (tensor + 0.375).sqrt()
+
+
+def _save_dirichlet_concentration(
+    counts: torch.Tensor,
+    out_dir: str,
+    out_fname: str = "concentration.pt",
+):
+    concentration = counts.mean(1)
+    torch.save(concentration, "temp.pt")
+
+
+def _save_stats(
+    counts: torch.Tensor,
+    masks: torch.Tensor,
+    out_dir: str,
+    ans_fname: str = "anscombe_stats.pt",
+    stats_fname: str = "stats.pt",
+):
+    # apply masks to data
+    counts = counts * masks
+
+    # anscombe transform the raw counts
+    ans_transformed = anscombe_transform(counts)
+    ans_mean = ans_transformed.mean()
+    ans_var = ans_transformed.var()
+    ans_stats = torch.tensor([ans_mean, ans_var])
+
+    # get regular mean
+    mean = counts.mean()
+    var = counts.var()
+    stats = torch.tensor([mean, var])
+
+    # output dir
+    outdir = Path(out_dir)
+
+    # Out filenames
+    ans_stats_fname = outdir / ans_fname
+    s_fname = outdir / stats_fname
+
+    # Save stats
+    torch.save(ans_stats, ans_stats_fname)
+    torch.save(stats, s_fname)
+
+
 def main():
     import torch
     from dials.util import Sorry
@@ -654,6 +694,18 @@ def main():
         # save metadata.pt file
         refl_as_pt(
             refl=refl_fname.as_posix(),
+            out_dir=args.out_dir,
+        )
+
+        # save stats
+        _save_stats(
+            counts=counts,
+            masks=masks,
+            out_dir=args.out_dir,
+        )
+
+        _save_dirichlet_concentration(
+            counts=counts,
             out_dir=args.out_dir,
         )
 
