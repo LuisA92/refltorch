@@ -443,18 +443,18 @@ def _get_blocks(
 
 
 def _save_as_pt(
-    out_dir: str,
     counts: torch.Tensor,
     masks: torch.Tensor,
+    out_dir: Path,
     counts_fname: str = "counts.pt",
     masks_fname: str = "masks.pt",
 ):
-    out_dir_ = Path(out_dir)
-    out_dir_.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # setting filenames
-    c = out_dir_ / counts_fname
-    m = out_dir_ / masks_fname
+    c = out_dir / counts_fname
+    m = out_dir / masks_fname
 
     torch.save(counts, c)
     torch.save(masks, m)
@@ -468,17 +468,18 @@ def anscombe_transform(
 
 def _save_dirichlet_concentration(
     counts: torch.Tensor,
-    out_dir: str,
+    out_dir: Path,
     out_fname: str = "concentration.pt",
 ):
     concentration = counts.mean(1)
-    torch.save(concentration, "temp.pt")
+    fname = out_dir / out_fname
+    torch.save(concentration, fname)
 
 
 def _save_stats(
     counts: torch.Tensor,
     masks: torch.Tensor,
-    out_dir: str,
+    out_dir: Path,
     ans_fname: str = "anscombe_stats.pt",
     stats_fname: str = "stats.pt",
 ):
@@ -496,12 +497,9 @@ def _save_stats(
     var = counts.var()
     stats = torch.tensor([mean, var])
 
-    # output dir
-    outdir = Path(out_dir)
-
     # Out filenames
-    ans_stats_fname = outdir / ans_fname
-    s_fname = outdir / stats_fname
+    ans_stats_fname = out_dir / ans_fname
+    s_fname = out_dir / stats_fname
 
     # Save stats
     torch.save(ans_stats, ans_stats_fname)
@@ -693,7 +691,7 @@ def main():
     if args.save_as_pt:
         # save counts.pt and masks.pt
         _save_as_pt(
-            out_dir=args.out_dir,
+            out_dir=out_dir,
             counts=counts,
             masks=masks,
             counts_fname=args.counts_fname,
@@ -702,19 +700,19 @@ def main():
         # save metadata.pt file
         refl_as_pt(
             refl=refl_fname.as_posix(),
-            out_dir=args.out_dir,
+            out_dir=out_dir,
         )
 
         # save stats
         _save_stats(
             counts=counts,
             masks=masks,
-            out_dir=args.out_dir,
+            out_dir=out_dir,
         )
 
         _save_dirichlet_concentration(
             counts=counts,
-            out_dir=args.out_dir,
+            out_dir=out_dir,
         )
 
 

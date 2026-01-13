@@ -53,7 +53,7 @@ def refl_as_pt(
     refl,
     column_names: list[str] = DEFAULT_REFL_COLS,
     excluded_columns: list[str] = DEFAULT_EXCLUDED_COLS,
-    out_dir: str | None = None,
+    out_dir: Path | None = None,
     out_fname: str = "metadata.pt",
 ) -> dict:
     ds = io.read_dials_stills(
@@ -69,7 +69,7 @@ def refl_as_pt(
 
     # write to output directory if specified
     if out_dir is not None:
-        fname = Path(out_dir) / out_fname
+        fname = out_dir / out_fname
     else:
         fname = out_fname
 
