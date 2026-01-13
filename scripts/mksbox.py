@@ -105,7 +105,7 @@ def run_all_blocks(
     dx,
 ):
     cpu_count = os.cpu_count() or 1
-    max_workers = min(4, cpu_count)
+    max_workers = min(8, cpu_count)
 
     results = []
 
