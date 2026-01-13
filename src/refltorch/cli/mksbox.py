@@ -315,6 +315,8 @@ def _get_bounding_boxes(
     These boxes are NOT clipped to the detector or frame range.
     Padding is handled later during extraction.
     """
+    from dials.array_family import flex
+
     bbox = flex.int6(len(reflections))
 
     for j, (_x, _y, _z) in enumerate(zip(x, y, z)):
