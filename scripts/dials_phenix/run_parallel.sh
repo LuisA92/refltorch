@@ -9,9 +9,6 @@
 #SBATCH -o pytorch_%j.out
 #SBATCH -e pytorch_%j.err
 
-# Set up error handling
-set -e
-
 # source micromamba
 source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
 
@@ -22,6 +19,7 @@ micromamba activate integrator
 run_dir=run_$SLURM_JOB_ID
 mkdir $run_dir
 cp intgratr.yaml run_$SLURM_JOB_ID/config_copy.yaml
+
 
 # train integrator
 integrator.train -v \

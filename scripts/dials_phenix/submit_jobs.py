@@ -47,9 +47,7 @@ def main():
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
 
-    # -------------------------
     # dials_phenix_job.sh
-    # -------------------------
     dials_script = textwrap.dedent(
         f"""\
         #!/bin/bash
@@ -71,16 +69,14 @@ def main():
     dials_script_path.write_text(dials_script)
     dials_script_path.chmod(0o755)
 
-    # -------------------------
     # upload_wandb.sh
-    # -------------------------
     upload_script = textwrap.dedent(
         f"""\
         #!/bin/bash
         echo "All array jobs completed. Starting WandB upload..."
         echo "Started at: $(date)"
 
-        source /n/holylabs/LABS/hekstra_lab/Users/laldama/micromamba/etc/profile.d/micromamba.sh
+        source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
         micromamba activate integrator
 
         python stats.py --path "{run_dir}"
@@ -93,9 +89,7 @@ def main():
     upload_script_path.write_text(upload_script)
     upload_script_path.chmod(0o755)
 
-    # -------------------------
     # Submit array job
-    # -------------------------
     sbatch_cmd = [
         "sbatch",
         "--parsable",
@@ -113,9 +107,7 @@ def main():
     job_id = subprocess.check_output(sbatch_cmd, text=True).strip()
     print(f"Submitted job array with tasks 0-{num_files}, Job ID: {job_id}")
 
-    # -------------------------
     # Submit dependent job
-    # -------------------------
     upload_cmd = [
         "sbatch",
         "--parsable",
