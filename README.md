@@ -2,7 +2,7 @@
 
 ## macOS
 
-If using macOS, install DIALS and PyTorch using micromamba or conda. 
+On macOS, install DIALS and PyTorch using micromamba or conda. 
 
 ```bash
 
@@ -26,6 +26,9 @@ uv pip install -e .
 ```
 
 ## Linux
+
+On Linux you can pip install PyTorch. 
+DIALS should still be installed with micromamba.
 
 ```bash
 
