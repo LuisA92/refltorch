@@ -508,6 +508,7 @@ def _save_stats(
 
 def main():
     import torch
+    import yaml
     from dials.array_family import flex
     from dials.util import Sorry
     from dials.util.options import (
@@ -599,6 +600,11 @@ def main():
         raise Sorry("Need 1 reflection table, got %d" % len(reflections))
     else:
         reflections = reflections[0]
+
+    identifier = dict(reflections.experiment_identifiers())
+
+    id_fname = out_dir / "identifiers.yaml"
+    id_fname.write_text(yaml.safe_dump(identifier))
 
     # Check the reflections contain the necessary stuff
     assert "bbox" in reflections
