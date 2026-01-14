@@ -11,7 +11,7 @@ from refltorch.io import load_config
 def parse_args():
     parser = argparse.ArgumentParser(description="Submit DIALS+Phenix SLURM array job")
     parser.add_argument(
-        "run_dir",
+        "--run-dir",
         type=Path,
         help="Run directory containing parallel_config.json",
     )
@@ -30,7 +30,7 @@ def main():
 
     # Reading in pred.yaml
     meta = yaml.safe_load((run_dir / "run_metadata.yaml").read_text())
-    wb = meta["wandb"]
+    # wb = meta["wandb"]
 
     # Config file containing env paths
     cfg_file = run_dir / "dials_phenix_cfg.yaml"
@@ -44,7 +44,7 @@ def main():
     if num_files < 0:
         raise ValueError("No .refl files found in config")
 
-    logs_dir = Path("logs")
+    logs_dir = Path(args.log_dir)
     logs_dir.mkdir(exist_ok=True)
 
     # dials_phenix_job.sh
@@ -94,8 +94,8 @@ def main():
         "sbatch",
         "--parsable",
         "--job-name=dials_phenix_parallel",
-        "--output=logs/dials_phenix_%A_%a.out",
-        "--error=logs/dials_phenix_%A_%a.err",
+        f"--output={logs_dir}/dials_phenix_%A_%a.out",
+        f"--error={logs_dir}/dials_phenix_%A_%a.err",
         "--time=10:00:00",
         "--mem=8G",
         "--partition=shared",
@@ -113,8 +113,8 @@ def main():
         "--parsable",
         f"--dependency=afterany:{job_id}",
         "--job-name=wandb_upload",
-        "--output=logs/wandb_upload_%j.out",
-        "--error=logs/wandb_upload_%j.err",
+        f"--output={logs_dir}/wandb_upload_%j.out",
+        f"--error={logs_dir}/wandb_upload_%j.err",
         "--time=01:00:00",
         "--mem=4G",
         "--partition=seas_compute",
