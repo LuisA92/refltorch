@@ -21,6 +21,11 @@ def parse_args():
         default="dials_phenix_logs",
         help="Path to logging directory",
     )
+    parser.add_argument(
+        "--script-dir",
+        type=str,
+        help="Path to directory containing .py files; e.g. process_single_refl.py",
+    )
     return parser.parse_args()
 
 
@@ -47,6 +52,9 @@ def main():
     logs_dir = Path(args.log_dir)
     logs_dir.mkdir(exist_ok=True)
 
+    # process_single_refl path
+    proc_py = (Path(args.script_dir) / "process_single.py").as_posix()
+
     # dials_phenix_job.sh
     dials_script = textwrap.dedent(
         f"""\
@@ -59,7 +67,7 @@ def main():
         echo "Started at: $(date)"
         echo "Working dir: {run_dir}"
 
-        python process_single.py --config "{cfg_file}" --index $SLURM_ARRAY_TASK_ID
+        python {proc_py} --config "{cfg_file}" --index $SLURM_ARRAY_TASK_ID
 
         echo "Finished at: $(date)"
         """
