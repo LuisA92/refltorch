@@ -53,6 +53,5 @@ python $refltorch_dir/create_config.py --run-dir $run_dir
 
 # Submit jobs for scaling/merging/find_peaks
 python $refltorch_dir/submit_jobs.py \
-  --run-dir \
-  $run_dir \
+  --run-dir $run_dir \
   --script-dir $refltorch_dir

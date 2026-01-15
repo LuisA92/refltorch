@@ -53,7 +53,7 @@ def main():
     logs_dir.mkdir(exist_ok=True)
 
     # process_single_refl path
-    proc_py = (Path(args.script_dir) / "process_single.py").as_posix()
+    proc_py = (Path(args.script_dir) / "process_single_refl.py").as_posix()
 
     # dials_phenix_job.sh
     dials_script = textwrap.dedent(
