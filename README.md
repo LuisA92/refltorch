@@ -1,6 +1,6 @@
-# Installation
+# README
 
-## macOS
+# Installation
 
 On macOS, install DIALS and PyTorch using micromamba or conda. 
 
