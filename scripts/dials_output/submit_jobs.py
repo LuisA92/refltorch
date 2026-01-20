@@ -52,8 +52,9 @@ def main():
     logs_dir = Path(args.log_dir)
     logs_dir.mkdir(exist_ok=True)
 
-    # process_single_refl path
-    proc_py = (Path(args.script_dir) / "process_single_refl.py").as_posix()
+    # Script directory
+    script_dir = Path(args.script_dir)
+    proc_py = (script_dir / "process_single_refl.py").as_posix()
 
     # dials_phenix_job.sh
     dials_script = textwrap.dedent(
@@ -77,6 +78,9 @@ def main():
     dials_script_path.write_text(dials_script)
     dials_script_path.chmod(0o755)
 
+    # Plot script
+    plot_script = (script_dir / "compare_models.py").as_posix()
+
     # Script to generate figures
     # Depends on DIALS/PHENIX processing
     upload_script = textwrap.dedent(
@@ -88,7 +92,7 @@ def main():
         source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
         micromamba activate refltorch
 
-        python stats.py --path "{run_dir}"
+        {plot_script} --run-dirs "{[run_dir]}"
 
         echo "Finished at: $(date)"
         """

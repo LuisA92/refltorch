@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument(
         "--seqids",
         type=list,
+        default=[204, 205, 206],
         help="List of anomalous atom sequence ids",
     )
     parser.add_argument(
@@ -285,6 +286,7 @@ def main():
     # save_dir = Path("test_out")
     # save_dir.mkdir(exist_ok=True)
 
+    wandb_log = None
     for rd in run_dirs:
         path = Path(rd)
         run_metadata = list(path.glob("run_metadata.yaml"))[0]
@@ -314,6 +316,15 @@ def main():
             "model_metadata": model_meta,
             "wandb_log_dir": wandb_log.as_posix(),
         }
+
+    # FIX: this is brittle, make save-directory more robust
+    if args.save_dir is not None:
+        save_dir = args.save_dir
+    else:
+        if wandb_log is None:
+            raise ValueError("W&B directory not found")
+        save_dir = wandb_log / "plots"
+    # ENDFIX
 
     lf = pl.scan_csv(peak_csvs, include_file_paths="filenames")
     lf = lf.with_columns(
