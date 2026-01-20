@@ -18,7 +18,16 @@ def parse_args():
         description="Script to process and upload integration output results to W&B"
     )
 
-    parser.add_argument("--run-dir", type=str, help="Path to run-directory")
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        help="Path to run-directory",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        help="Path to save directory",
+    )
 
     return parser.parse_args()
 
@@ -463,7 +472,11 @@ def main():
     wandb_log = Path(config["wandb"]["log_dir"]).parent
 
     # directory to save images
-    save_dir = wandb_log / "plots"
+    if args.save_dir is not None:
+        save_dir = args.save_dir
+    else:
+        save_dir = wandb_log / "plots"
+
     save_dir.mkdir(exist_ok=True)
 
     # Getting data files

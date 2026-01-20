@@ -55,3 +55,6 @@ python $refltorch_dir/create_config.py --run-dir $run_dir
 python $refltorch_dir/submit_jobs.py \
   --run-dir $run_dir \
   --script-dir $refltorch_dir
+
+# generate plots
+

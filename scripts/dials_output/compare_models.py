@@ -1,8 +1,11 @@
 import argparse
+from collections.abc import Iterable
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
+import seaborn as sns
 
 from refltorch.io import load_config
 from refltorch.plots import setup_mpl_config
@@ -148,13 +151,134 @@ def _get_reference_data_path(run_config: dict) -> Path:
     return Path(cfg["global_vars"]["data_dir"]).parent
 
 
+def _plot_metric(
+    run_ids: Iterable,
+    df_map: dict[str, pl.DataFrame],
+    base_df: pl.DataFrame,
+    model_metadata: dict,
+    x_label: str,
+    y_label: str,
+    title: str,
+    x_key: str = "bin_id",
+    y_key: str = "mean_qi_var",
+    y_scale: bool | None = None,
+):
+    # plotting the mean qi_var per model
+    fig, ax = plt.subplots(figsize=(10, 8))
+    labels = base_df["bin_labels"].to_list()
+    ticks = base_df["bin_id"].to_list()
+
+    for r in run_ids:
+        df_ = df_map[r]
+        # iterate over each epoch
+
+        df = base_df.join(df_, on="bin_labels", how="left").sort("bin_id")
+
+        # plot
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+        ax.plot(
+            df[x_key],
+            df[y_key],
+            label=model_name,
+        )
+
+    ax.set_xlabel(x_label)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    if y_scale is not None:
+        ax.set_yscale("log")
+    ax.legend()
+    ax.grid()
+    return fig, ax
+
+
+def _plot_per_epoch_metric(
+    df,
+    base_df: pl.DataFrame,
+    x_label: str,
+    y_label: str,
+    title: str,
+    fname: str,
+    epochs,
+    y_scale: str | None = None,
+    x_key: str = "bin_id",
+    y_key: str = "mean_qi_var",
+):
+    # plotting the mean qi_var per model
+
+    n_epochs = len(epochs)
+    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
+    colors = cmap(np.linspace(0, 1, n_epochs))
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    for c, e in zip(colors, epochs):
+        df_ = df.filter(pl.col("epoch") == e)
+        df_ = base_df.join(df_, on="bin_labels", how="left").sort("bin_id")
+
+        ax.plot(
+            df_[x_key],
+            df_[y_key],
+            c=c,
+        )
+    ax.grid()
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    if y_scale is not None:
+        ax.set_yscale(y_scale)
+    fig.savefig(fname)
+
+
+def _get_df_map(
+    lf,
+    run_ids,
+    edges,
+    bin_labels,
+    bin_key="qi_mean",
+    group_key=["bin_labels"],
+) -> dict:
+    df_map = {}
+    for r in run_ids:
+        lf_r = lf.filter(pl.col("run_id") == r)
+
+        lf_ = (
+            lf_r.with_columns(
+                pl.col(bin_key)
+                .cut(
+                    edges,
+                    labels=bin_labels,
+                )
+                .alias("bin_labels")
+            )
+            .group_by(group_key)
+            .agg(
+                fano=(pl.col("qi_var") / pl.col("qi_mean")).mean(),
+                mean_qi_var=pl.col("qi_var").mean(),
+                var_qi_var=pl.col("qi_var").var(),
+                min_qi_var=pl.col("qi_var").min(),
+                max_qi_var=pl.col("qi_var").max(),
+                mean_qi_mean=pl.col("qi_mean").mean(),
+                var_qi_mean=pl.col("qi_mean").var(),
+                min_qi_mean=pl.col("qi_mean").min(),
+                max_qi_mean=pl.col("qi_mean").max(),
+                n=pl.len(),
+            )
+        )
+        df_map[r] = lf_.collect()
+    return df_map
+
+
 def main():
     args = parse_args()
     run_dirs = args.run_dirs
     n_models = len(run_dirs)
+    save_dir = args.save_dir
 
     peak_csvs = []
     train_metric_files = []
+    pt_files = []
     model_metadata = {}
 
     # Setting up save_dir
@@ -180,6 +304,8 @@ def main():
         train_metric_files.extend(
             list((wandb_log / "files/train_metrics").glob("*.parquet"))
         )
+
+        pt_files.extend(list((wandb_log / "predictions").glob("**/preds.pt")))
 
         # Store model metadata
         model_metadata[run_id] = {
@@ -255,7 +381,9 @@ def main():
     )
 
     bin_labels, base_df = _get_bins(edges=INTENSITY_EDGES)
+    base_df = base_df.collect()
 
+    # TODO: Make this this into a function
     # Iterate over each run
     for r in run_ids:
         lf_r = lf_train_metrics.filter(pl.col("run_id") == r)
@@ -272,67 +400,331 @@ def main():
                 n=pl.len(),
             )
             .sort(["epoch", "bin_labels"])
+        ).collect()
+
+        cmap = sns.cubehelix_palette(
+            start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True
         )
+        cmap_list = cmap(np.linspace(0.0, 1, len(epochs), retstep=True)[0])
 
         fig, ax = plt.subplots(figsize=(7, 5))
-        for e in epochs:
-            lf_ = lf_.filter(pl.col("epoch") == e)
-            joined = base_df.join(lf_, on="bin_labels", how="left")
+        for c, e in zip(cmap_list, epochs):
+            lf_epoch = lf_.filter(pl.col("epoch") == e)
+            joined = base_df.join(lf_epoch, on="bin_labels", how="left")
 
-            ax.plot()
+            ax.plot(joined["bin_id"], joined["fano"], c=c)
+        ax.set_xlabel("intensity bin")
+        ax.set_xticklabels(joined["bin_labels"], rotation=45, ha="right")
+        ax.set_ylabel("fano")
+        ax.grid()
+        plt.tight_layout()
+        fig.savefig(f"test_out/run_{r}_fano.png")
+    # END TODO
 
-        joined = base_df.join(lf_, on="bin_labels", how="left").sort("bin_id")
-        plot_fano_over_epoch(lf_)
-        print(joined.collect())
+    # %%
+    # plotting the mean qi per model
+    # todo: make this into a function
+    dials_edges = DIALS_EDGES_9B7C
+    bin_labels, base_df = _get_bins(edges=dials_edges)
+    base_df = base_df.collect()
 
+    # BINNING BY RESOLUTION
+    # getting pl.DataFrame map
+    df_map = _get_df_map(
+        lf_train_metrics,
+        run_ids,
+        dials_edges,
+        bin_labels,
+        bin_key="d",
+    )
 
-def _plot_iodine(
-    df,
-    ax,
-    label,
-    epochs,
-    seqid: int,
-    ref_df: None = None,
-):
-    y = df.filter(pl.col("seqid") == seqid)["peakz"].unique()
-    ax.plot(epochs, y, label=label)
-    if ref_df is not None:
-        ax.plot(
-            epochs,
+    # Plotting mean qi.var
+
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean qI.variance over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.variance",
+        x_key="bin_id",
+        y_key="mean_qi_var",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_qi_var_model_bin_by_res.png")
+    plt.close(fig)
+
+    # Plotting mean qi.mean
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean qI.mean over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="mean_qi_mean",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_qi_mean_models_resolution.png")
+    plt.close(fig)
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="fano",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_fano_models_resolution.png")
+    plt.close(fig)
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="var_qi_mean",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/var_qi_mean_models_res_bin.png")
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="var_qi_var",
+        y_scale=True,
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/var_qi_var_models_res_bin.png")
+
+    # per epoch
+    # binned by ersolution
+    df_map = _get_df_map(
+        lf_train_metrics,
+        run_ids,
+        dials_edges,
+        bin_labels,
+        bin_key="d",
+        group_key=["epoch", "bin_labels"],
+    )
+
+    # Per epoch
+    # binned by resolution
+    for r in run_ids:
+        df_ = df_map[r]
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="mean_qi_var",
+            title=f"Mean qi.var over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_mean_qi_var_resbin_per_epoch.png",
+            epochs=epochs,
+            y_scale="log",
         )
-    return ax
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="fano",
+            title=f"Mean fano over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_mean_fano_resbin_per_epoch.png",
+            epochs=epochs,
+            y_scale="log",
+        )
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="var_qi_mean",
+            title=f"Mean var(qi.var) over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_var_qi_var_resbin_per_epoch.png",
+            epochs=epochs,
+            y_scale="log",
+        )
+
+    # BINNING BY INTENSITY
+    # getting pl.DataFrame map
+    intensity_edges = INTENSITY_EDGES
+    bin_labels, base_df = _get_bins(edges=intensity_edges)
+    base_df = base_df.collect()
+
+    df_map = _get_df_map(
+        lf_train_metrics,
+        run_ids,
+        intensity_edges,
+        bin_labels,
+    )
+
+    # Plotting mean qi.var
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean qI.variance over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.variance",
+        x_key="bin_id",
+        y_key="mean_qi_var",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_qi_var_models_intensity_bins.png")
+
+    # Plotting mean qi.mean
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean qI.mean over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="mean_qi_mean",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_qi_mean_models_intensity_bins.png")
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="fano",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/mean_fano_models_intensity_bins.png")
+
+    # Plotting variance(qi.mean)
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="var_qi_mean",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="var_qi_mean",
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+
+    # Plotting mean fano
+    fig, ax = _plot_metric(
+        run_ids=run_ids,
+        df_map=df_map,
+        base_df=base_df,
+        model_metadata=model_metadata,
+        title="Mean fano over resolution bin",
+        x_label="intensity bin",
+        y_label="mean qi.mean",
+        x_key="bin_id",
+        y_key="var_qi_var",
+        y_scale=True,
+    )
+    plt.tight_layout()
+    fig.savefig(f"{save_dir}/var_qi_var_models_intensity_bins.png")
+
+    # TODO:
+    # Per epoch metrics
+    df_map = _get_df_map(
+        lf_train_metrics,
+        run_ids,
+        intensity_edges,
+        bin_labels,
+        bin_key="qi_mean",
+        group_key=["epoch", "bin_labels"],
+    )
+
+    for r in run_ids:
+        df_ = df_map[r]
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="mean_qi_var",
+            title=f"Mean qi.var over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_mean_qi_var_per_epoch.png",
+            epochs=epochs,
+        )
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="fano",
+            title=f"Mean fano over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_mean_fano_per_epoch.png",
+            epochs=epochs,
+        )
+        _plot_per_epoch_metric(
+            df_,
+            base_df=base_df,
+            x_label="bin",
+            y_label="",
+            x_key="bin_id",
+            y_key="var_qi_mean",
+            title=f"Mean var(qi.var) over epoch for model {model_name}",
+            fname=f"{save_dir}/run_{r}_var_qi_var_per_epoch.png",
+            epochs=epochs,
+        )
 
 
 if __name__ == "__main__":
     main()
-
-"""
-['./gammaC_run_55410873/']
-['./gammaC_run_55410873/','./gammaB_run_55340166/','./gammaA_run_55340165/','./folded_normal_A_run_55416467/']
-"""
-
-lf = (
-    pl.scan_parquet(train_metrics, include_file_paths="filenames")
-    .with_columns(
-        run_id=pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1),
-        epoch=pl.col("filenames")
-        .str.extract(r"/train_epoch_(\d+).parquet", 1)
-        .cast(pl.Int32),
-    )
-    .with_columns(
-        bin_labels=pl.when(pl.col("qi_mean") < 0)
-        .then(pl.lit("<0"))
-        .otherwise(pl.col("qi_mean").cut(INTENSITY_EDGES, labels=bin_labels))
-    )
-)
-
-
-lf_agg = lf.group_by(["run_id", "epoch", "bin_labels"]).agg(
-    fano=pl.col("qi_var").mean() / pl.col("qi_mean").mean(),
-    n=pl.len(),
-)
-
-lf_joined = base_df.join(lf_agg, on="bin_labels", how="left").sort("bin_id")
-
-df_all = lf_joined.collect()
-

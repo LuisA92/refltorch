@@ -77,15 +77,16 @@ def main():
     dials_script_path.write_text(dials_script)
     dials_script_path.chmod(0o755)
 
-    # upload_wandb.sh
+    # Script to generate figures
+    # Depends on DIALS/PHENIX processing
     upload_script = textwrap.dedent(
         f"""\
         #!/bin/bash
-        echo "All array jobs completed. Starting WandB upload..."
+        echo "All array jobs completed. Generating plots"
         echo "Started at: $(date)"
 
         source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
-        micromamba activate integrator
+        micromamba activate refltorch
 
         python stats.py --path "{run_dir}"
 
