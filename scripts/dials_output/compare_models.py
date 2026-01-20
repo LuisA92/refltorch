@@ -21,12 +21,12 @@ def parse_args():
 
     parser.add_argument(
         "--run-dirs",
-        type=list,
+        nargs="+",
         help="List of paths to the run-directories",
     )
     parser.add_argument(
         "--seqids",
-        type=list,
+        nargs="+",
         default=[204, 205, 206],
         help="List of anomalous atom sequence ids",
     )
@@ -274,17 +274,15 @@ def _get_df_map(
 def main():
     args = parse_args()
     run_dirs = args.run_dirs
+    print(run_dirs)
     n_models = len(run_dirs)
-    save_dir = args.save_dir
+
+    # save_dir = args.save_dir
 
     peak_csvs = []
     train_metric_files = []
     pt_files = []
     model_metadata = {}
-
-    # Setting up save_dir
-    # save_dir = Path("test_out")
-    # save_dir.mkdir(exist_ok=True)
 
     wandb_log = None
     for rd in run_dirs:

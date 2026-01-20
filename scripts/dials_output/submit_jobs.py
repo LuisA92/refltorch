@@ -92,7 +92,7 @@ def main():
         source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
         micromamba activate refltorch
 
-        python {plot_script} --run-dirs "{[run_dir]}"
+        python {plot_script} --run-dirs "{run_dir}"
 
         echo "Finished at: $(date)"
         """
