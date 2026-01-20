@@ -324,6 +324,7 @@ def main():
         if wandb_log is None:
             raise ValueError("W&B directory not found")
         save_dir = wandb_log / "plots"
+        save_dir.mkdir(exist_ok=True)
     # ENDFIX
 
     lf = pl.scan_csv(peak_csvs, include_file_paths="filenames")
@@ -337,12 +338,13 @@ def main():
         ]
     )
 
-    #
-
+    # reference data if available
     ref_data_path = _get_reference_data_path(run_metadata)
     ref_peak, ref_merged_html = _get_reference_data(ref_data_path)
     ref_df = pl.scan_csv(ref_peak)
-    epochs = ref_df.select("epoch")
+
+    # list of epochs
+    epochs = lf.collect()["epoch"].to_list()
 
     # TODO: Add seqids to args
     seqids = [204, 205, 206]
