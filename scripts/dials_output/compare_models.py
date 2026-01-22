@@ -2,10 +2,12 @@ import argparse
 from collections.abc import Iterable
 from pathlib import Path
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
+import wandb
 
 from refltorch.io import load_config
 from refltorch.plots import setup_mpl_config
@@ -293,6 +295,20 @@ def _plot_anomalous_metric(
     return fig, ax
 
 
+def _get_val_loss(wb_data):
+    df = pl.DataFrame(wb_data)
+    df = df.select(["trainer/global_step", "epoch", "val/loss", "val nll", "val kl"])
+    return df.drop_nulls()
+
+
+def _get_train_loss(wb_data):
+    df = pl.DataFrame(wb_data)
+    df = df.select(
+        ["trainer/global_step", "epoch", "train/loss", "train nll", "train kl"]
+    )
+    return df.drop_nulls()
+
+
 def main():
     args = parse_args()
     run_dirs = args.run_dirs
@@ -310,7 +326,8 @@ def main():
         run_metadata = list(path.glob("run_metadata.yaml"))[0]
         run_metadata = load_config(run_metadata)
 
-        # wandb id
+        # wandb metadata
+        project = run_metadata["wandb"]["project"]
         run_id = run_metadata["wandb"]["run_id"]
 
         model_meta = _get_reference_metadata(run_metadata)
@@ -327,12 +344,16 @@ def main():
 
         pt_files.extend(list((wandb_log / "predictions").glob("**/preds.pt")))
 
+        # Getting metrics from W&B
+        loss_df = wandb.Api().run(project + "/" + run_id).history()
+
         # Store model metadata
         model_metadata[run_id] = {
             "run_metadata": run_metadata,
             "run_id": run_id,
             "model_metadata": model_meta,
             "wandb_log_dir": wandb_log.as_posix(),
+            "loss_df": loss_df,
         }
 
     # FIX: this is brittle, make save-directory more robust
@@ -801,6 +822,181 @@ def main():
             fname=f"{save_dir}/run_{r}_var_qi_var_per_epoch.png",
             epochs=epochs,
         )
+
+    colors = mpl.colormaps["Dark2"].colors
+
+    # NOTE:
+    # train and validation ELBO
+    fig, ax = plt.subplots()
+    for i, r in enumerate(run_ids):
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        ax.plot(
+            val_loss_df["epoch"],
+            val_loss_df["val/loss"],
+            label=f"val: {model_name}",
+            linestyle="--",
+            c=colors[i % len(colors)],
+        )
+        ax.plot(
+            train_loss_df["epoch"],
+            train_loss_df["train/loss"],
+            label=f"train: {model_name}",
+            c=colors[i % len(colors)],
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("negative log likelihood")
+    ax.set_ylim(ymax=3000)
+    ax.set_title("ELBO vs Epoch")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/elbo_loss.png")
+
+    # NOTE:
+    # train and validation NLL
+    fig, ax = plt.subplots()
+    for i, r in enumerate(run_ids):
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        ax.plot(
+            val_loss_df["epoch"],
+            val_loss_df["val nll"],
+            label=f"val: {model_name}",
+            linestyle="--",
+            c=colors[i % len(colors)],
+        )
+        ax.plot(
+            train_loss_df["epoch"],
+            train_loss_df["train nll"],
+            label=f"train: {model_name}",
+            c=colors[i % len(colors)],
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("negative log likelihood")
+    ax.set_ylim(ymax=3000)
+    ax.set_title("NLL vs Epoch")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/nll_loss.png")
+
+    # NOTE:
+    # train and validation KL
+    fig, ax = plt.subplots()
+    for i, r in enumerate(run_ids):
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        ax.plot(
+            val_loss_df["epoch"],
+            val_loss_df["val kl"],
+            label=f"val: {model_name}",
+            linestyle="--",
+            c=colors[i % len(colors)],
+        )
+        ax.plot(
+            train_loss_df["epoch"],
+            train_loss_df["train kl"],
+            label=f"train: {model_name}",
+            c=colors[i % len(colors)],
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("KL divergence")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/kl_loss.png")
+
+    # NOTE:
+    # val/train ELBO gap
+    fig, ax = plt.subplots()
+    for i, r in enumerate(run_ids):
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+
+        # combining train and val
+        combined_loss_df = val_loss_df.join(train_loss_df, on="epoch", how="left")
+        combined_loss_df = combined_loss_df.with_columns(
+            elbo_diff=pl.col("val/loss") - pl.col("train/loss")
+        )
+
+        # label for plot
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        #
+        ax.plot(
+            combined_loss_df["epoch"],
+            combined_loss_df["elbo_diff"],
+            label=f"val: {model_name}",
+            c=colors[i % len(colors)],
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("val_loss - train_loss")
+    ax.set_title("validation/training loss gap")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/elbo_gap.png")
+
+    # NOTE:
+    # val/train NLL gap
+    fig, ax = plt.subplots()
+    for r in run_ids:
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+
+        # combining train and val
+        combined_loss_df = val_loss_df.join(train_loss_df, on="epoch", how="left")
+        combined_loss_df = combined_loss_df.with_columns(
+            nll_diff=pl.col("val nll") - pl.col("train nll")
+        )
+
+        # label for plot
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        #
+        ax.plot(
+            combined_loss_df["epoch"],
+            combined_loss_df["nll_diff"],
+            label=f"val: {model_name}",
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("val_nll - train_nll")
+    ax.set_title("validation/training NLL gap")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/nll_gap.png")
+
+    # NOTE:
+    # val/train KL gap
+    fig, ax = plt.subplots()
+    for r in run_ids:
+        val_loss_df = _get_val_loss(model_metadata[r]["loss_df"])
+        train_loss_df = _get_train_loss(model_metadata[r]["loss_df"])
+
+        # combining train and val
+        combined_loss_df = val_loss_df.join(train_loss_df, on="epoch", how="left")
+        combined_loss_df = combined_loss_df.with_columns(
+            kl_diff=pl.col("val kl") - pl.col("train kl")
+        )
+
+        # label for plot
+        model_name = model_metadata[r]["model_metadata"]["qi_name"]
+
+        #
+        ax.plot(
+            combined_loss_df["epoch"],
+            combined_loss_df["kl_diff"],
+            label=f"val: {model_name}",
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("val_kl - train_kl")
+    ax.set_title("validation/training KL gap")
+    ax.grid()
+    ax.legend()
+    fig.savefig(f"{save_dir}/kl_gap.png")
 
 
 if __name__ == "__main__":
