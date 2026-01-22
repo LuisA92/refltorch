@@ -271,6 +271,28 @@ def _get_df_map(
     return df_map
 
 
+def _plot_anomalous_metric(
+    peak_lf: pl.LazyFrame,
+    run_ids: Iterable,
+    epoch_df: pl.DataFrame,
+    model_metadata: dict,
+    metric: str,
+):
+    fig, ax = plt.subplots()
+    for r in run_ids:
+        label = model_metadata[r]["model_metadata"]["qi_name"]
+        lf = peak_lf.filter(pl.col("run_id") == r)
+        df = lf.collect()
+        df = epoch_df.join(df, on="epoch", how="left").sort("epoch")
+        ax.plot(df["epoch"], df[metric], label=label)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel(metric)
+    ax.set_title(f"{metric} over epochs")
+    ax.legend()
+    ax.grid()
+    return fig, ax
+
+
 def main():
     args = parse_args()
     run_dirs = args.run_dirs
@@ -323,6 +345,9 @@ def main():
         save_dir.mkdir(exist_ok=True)
     # ENDFIX
 
+    ## Plotting anomalous iodine peak heights as function of epoch
+
+    # Scanning peak.csv files
     lf = pl.scan_csv(
         peak_csvs,
         include_file_paths="filenames",
@@ -334,6 +359,7 @@ def main():
         },
     )
 
+    # Extracting epoch from filename and appending as column
     lf = lf.with_columns(
         [
             pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1).alias("run_id"),
@@ -356,14 +382,45 @@ def main():
     seqids = [204, 205, 206]
 
     run_ids = lf.select("run_id").unique().collect().to_series()
-    epoch_df = lf.select("epoch").unique().collect().sort("epoch")
 
+    # epoch_df = lf.select("epoch").unique().collect().sort("epoch")
+    epoch_df = pl.DataFrame(
+        {"epoch": [int(x.name.split("_")[-1]) for x in pred_dir.iterdir()]}
+    )
+
+    # filter for anomalous residues
+    anom_residues = ["IOD", "MET", "CYS"]
+
+    # peak summary stats
+    peak_lf = lf.filter(pl.col("residue").is_in(anom_residues))
+    peak_lf = peak_lf.group_by(pl.col(["epoch", "run_id"])).agg(
+        total_signal=pl.col("peakz").sum(),
+        mean_signal=pl.col("peakz").mean(),
+        max_signal=pl.col("peakz").max(),
+        min_signal=pl.col("peakz").min(),
+        median_signal=pl.col("peakz").median(),
+    )
+
+    # NOTE:
+    # Plotting aggregated anomalous metrics
+    metrics = [
+        "total_signal",
+        "mean_signal",
+        "max_signal",
+        "min_signal",
+        "median_signal",
+    ]
+    for m in metrics:
+        fig, ax = _plot_anomalous_metric(peak_lf, run_ids, epoch_df, model_metadata, m)
+        fig.savefig(f"{save_dir}/{m}.png")
+
+    # NOTE:
     # plotting anomalous peak heights
     for s in seqids:
         fig, ax = plt.subplots(figsize=(8, 5))
         for rid in run_ids:
             df = (
-                lf.filter((pl.col("seqid").is_in(seqids)) & (pl.col("run_id") == rid))
+                lf.filter((pl.col("seqid") == s) & (pl.col("run_id") == rid))
                 .collect()
                 .sort(["epoch", "seqid"])
             )
@@ -373,7 +430,8 @@ def main():
             label = model_metadata[rid]["model_metadata"]["qi_name"]
 
             epochs = df["epoch"].unique()
-            y = df.filter(pl.col("seqid") == s)["peakz"].unique()
+
+            y = df["peakz"]
             ax.plot(epochs, y, label=label)
 
         ax.set_xlabel("epoch")
