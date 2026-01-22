@@ -98,6 +98,7 @@ def main():
         """
     )
 
+    # Handle paths
     upload_script_path = Path("upload_wandb.sh")
     upload_script_path.write_text(upload_script)
     upload_script_path.chmod(0o755)

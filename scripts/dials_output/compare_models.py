@@ -277,8 +277,6 @@ def main():
     print(run_dirs)
     n_models = len(run_dirs)
 
-    # save_dir = args.save_dir
-
     peak_csvs = []
     train_metric_files = []
     pt_files = []
@@ -325,7 +323,17 @@ def main():
         save_dir.mkdir(exist_ok=True)
     # ENDFIX
 
-    lf = pl.scan_csv(peak_csvs, include_file_paths="filenames")
+    lf = pl.scan_csv(
+        peak_csvs,
+        include_file_paths="filenames",
+        schema_overrides={
+            "seqid": pl.Int64,
+            "run_id": pl.Int64,
+            "epoch": pl.Int64,
+            "peakz": pl.Float32,
+        },
+    )
+
     lf = lf.with_columns(
         [
             pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1).alias("run_id"),
