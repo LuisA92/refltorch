@@ -341,14 +341,14 @@ def _plot_anomalous_metric(
 
 def _get_val_loss(wb_data):
     df = pl.DataFrame(wb_data)
-    df = df.select(["trainer/global_step", "epoch", "val/loss", "val nll", "val kl"])
+    df = df.select(["trainer/global_step", "epoch", "val elbo", "val nll", "val kl"])
     return df.drop_nulls()
 
 
 def _get_train_loss(wb_data):
     df = pl.DataFrame(wb_data)
     df = df.select(
-        ["trainer/global_step", "epoch", "train/loss", "train nll", "train kl"]
+        ["trainer/global_step", "epoch", "train elbo", "train nll", "train kl"]
     )
     return df.drop_nulls()
 
@@ -1046,22 +1046,18 @@ def _get_loss_dfs(run_data) -> tuple[pl.DataFrame, pl.DataFrame]:
 
     for v in run_data.values():
         val_loss_dfs.append(
-            _get_val_loss(v["loss_df"])
-            .with_columns(
+            _get_val_loss(v["loss_df"]).with_columns(
                 run_id=pl.lit(v["run_id"]),
                 name=pl.lit(v["model_name"]),
                 Stage=pl.lit("val"),
             )
-            .rename({"val/loss": "val elbo"})
         )
         train_loss_dfs.append(
-            _get_train_loss(v["loss_df"])
-            .with_columns(
+            _get_train_loss(v["loss_df"]).with_columns(
                 run_id=pl.lit(v["run_id"]),
                 name=pl.lit(v["model_name"]),
                 Stage=pl.lit("train"),
             )
-            .rename({"train/loss": "train elbo"})
         )
 
     val_loss_df = pl.concat(val_loss_dfs)
@@ -1222,16 +1218,17 @@ def _get_save_dir(args, run_data):
 
     # use user-specified save_dir if passed
     if args.save_dir is not None:
-        save_dir = args.save_dir
+        save_dir = Path(args.save_dir)
 
     elif n_models > 1:
         raise ValueError(
             "No save_dir specified. If analyzing more than 1 runs, you must specify a `save_dir`"
         )
     else:
-        if run_data["wandb_log_dir"] is None:
+        rd = next(iter(run_data.values()))
+        if rd["wandb_log_dir"] is None:
             raise ValueError("W&B directory not found")
-        save_dir = run_data["wanub_log_dir"] / "plots"
+        save_dir = Path(rd["wandb_log_dir"]) / "plots"
         save_dir.mkdir(exist_ok=True)
 
     return save_dir
@@ -1829,3 +1826,13 @@ def main():
 if __name__ == "__main__":
     main()
 # %%
+
+n_samples = 1900000
+tp = 0.7
+train_size = int(tp * n_samples)
+batch_size = 1024
+desired_steps = 50000
+
+n_steps_epoch = train_size / batch_size
+
+n_epochs_to_use = desired_steps / n_steps_epoch
