@@ -211,7 +211,7 @@ def _plot_metric(
         ax.plot(
             df[x_key],
             df[y_key],
-            label=r + model_name,
+            label=f"{model_name}_{r}",
         )
 
     ax.set_xlabel(x_label)
@@ -262,6 +262,7 @@ def _plot_per_epoch_metric(
     if y_scale is not None:
         ax.set_yscale(y_scale)
     fig.savefig(fname)
+    plt.close(fig)
 
 
 def _get_df_map(
@@ -504,6 +505,7 @@ def _plot_anom_peak_stats(
         )
         plt.tight_layout()
         fig.savefig(f"{save_dir}/anomalous_{m}.png")
+        plt.close(fig)
 
     pass
 
@@ -578,8 +580,11 @@ def _plot_merging_stats(
     run_ids,
     merging_stat_df,
     ref_merge_stats_df,
-    save_dir,
+    save_dir: Path,
 ):
+    out_dir = save_dir
+    out_dir.mkdir(exist_ok=True)
+
     for run in run_ids:
         df_ = merging_stat_df.filter(pl.col("run_id") == run)
 
@@ -675,7 +680,8 @@ def _plot_merging_stats(
         plt.suptitle(f"Merging statistics\n{model_name}\nwb id: {run_id}")
         plt.tight_layout()
 
-        fig.savefig(f"{save_dir}/merging_stats_run_{run}_model_{model_name}.png")
+        fig.savefig(f"{out_dir}/merging_stats_run_{run}_model_{model_name}.png")
+        plt.close(fig)
 
 
 def _get_corr_df(pred_lf):
@@ -690,7 +696,7 @@ def _get_corr_df(pred_lf):
         .agg(
             corr_I=pl.corr("qi_mean", "intensity.prf.value"),
             corr_var_I=pl.corr("qi_var", "intensity.prf.variance"),
-            corr_bg=pl.corr("qi_mean", "background.mean"),
+            corr_bg=pl.corr("qbg_mean", "background.mean"),
         )
         .sort("epoch")
         .collect()
@@ -700,9 +706,12 @@ def _get_corr_df(pred_lf):
 
 def _plot_correlations(
     corr_df,
-    save_dir,
+    save_dir: Path,
 ):
     for (run,), df_run in corr_df.group_by("run_id"):
+        out_dir = save_dir / f"{run}"
+        out_dir.mkdir(exist_ok=True)
+
         # Plotting intensity correlation
         cmap = sns.cubehelix_palette(
             start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True
@@ -731,7 +740,8 @@ def _plot_correlations(
         cbar.set_label("Epoch", fontsize=8, rotation=90)
 
         plt.tight_layout()
-        fig.savefig(f"{save_dir}/run_{run}_dials_corr_I.png")
+        fig.savefig(f"{out_dir}/run_{run}_dials_corr_I.png")
+        plt.close(fig)
 
         # Plotting background correlation
 
@@ -752,7 +762,8 @@ def _plot_correlations(
         cbar.set_label("Epoch", fontsize=8, rotation=90)
 
         plt.tight_layout()
-        fig.savefig(f"{save_dir}/run_{run}_dials_corr_bg.png")
+        fig.savefig(f"{out_dir}/run_{run}_dials_corr_bg.png")
+        plt.close(fig)
 
         # Plotting var(I) correlation
         fig, ax = plt.subplots()
@@ -772,7 +783,8 @@ def _plot_correlations(
         cbar.set_label("Epoch", fontsize=8, rotation=90)
 
         plt.tight_layout()
-        fig.savefig(f"{save_dir}/run_{run}_dials_corr_var_I.png")
+        fig.savefig(f"{out_dir}/run_{run}_dials_corr_var_I.png")
+        plt.close(fig)
 
 
 def _get_rval_df(
@@ -852,7 +864,9 @@ def _get_pred_lf(
     return pred_lf
 
 
-def _plot_run_merging_stats(run_ids, pred_lf, save_dir):
+def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
+    # Out directory
+
     # Plot hyper parameters
     n_samples = 10_000
     pad = 2.0
@@ -860,6 +874,9 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir):
     alpha2 = 0.5
 
     for run in run_ids:
+        out_dir = save_dir / f"{run}"
+        out_dir.mkdir(exist_ok=True)
+
         df = (
             pred_lf.filter(pl.col("run_id") == run)
             .select(
@@ -914,7 +931,7 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir):
             ax.set_xscale("symlog")
             ax.grid()
             plt.tight_layout()
-            fig.savefig(f"{save_dir}/run_{run}_vs_dials_I_{epoch}.png")
+            fig.savefig(f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png")
             plt.close(fig)
 
             # Plotting dials bg vs model bg
@@ -951,7 +968,7 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir):
             ax.set_ylabel(bg_dials_key)
             ax.grid()
             plt.tight_layout()
-            fig.savefig(f"{save_dir}/run_{run}_vs_dials_bg_{epoch}.png")
+            fig.savefig(f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png")
             plt.close(fig)
 
             # Plotting dials var(I) vs model var(I)
@@ -993,7 +1010,8 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir):
             ax.set_xscale("log")
             ax.grid()
             plt.tight_layout()
-            fig.savefig(f"{save_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png")
+            fig.savefig(f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png")
+            plt.close(fig)
 
 
 def _plot_r_values(
@@ -1001,13 +1019,14 @@ def _plot_r_values(
     save_dir: str | Path,
     linewidth: int = 2,
     figsize: tuple[int, int] = (8, 5),
+    ref_path: Path | None = None,
 ):
     # plot color
 
     c_pallete = sns.color_palette("Dark2")
     palette = {
         "r_work": "black",
-        "r_free": "red",
+        "r_free": "blue",
     }
 
     # plot line style
@@ -1015,8 +1034,14 @@ def _plot_r_values(
         "start": (2, 2),
         "final": "",
     }
+    if ref_path is not None:
+        ref_vals = _get_r_vals(ref_path)
 
     for (run,), run_df in long_df.group_by(pl.col("run_id")):
+        # out dir
+        out_dir = save_dir
+        out_dir.mkdir(exist_ok=True)
+
         fig, ax = plt.subplots(figsize=(8, 5))
 
         sns.lineplot(
@@ -1031,13 +1056,28 @@ def _plot_r_values(
             ax=ax,
         )
 
+        if ref_path is not None:
+            assert isinstance(ref_vals, dict)
+            ax.axhline(
+                ref_vals["r_work_final"],
+                color="red",
+                label="DIALS rwork final",
+            )
+            ax.axhline(
+                ref_vals["r_free_final"],
+                color="red",
+                linestyle="--",
+                label="DIALS rfree final",
+            )
+
         ax.set_xlabel("epoch")
         ax.set_ylabel("r value")
         ax.set_title(f"R-values vs epoch\nrun_id: {run}")
         ax.grid()
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
         plt.tight_layout()
-        fig.savefig(f"{save_dir}/run_{run}_test_unpivot.png")
+        fig.savefig(f"{out_dir}/run_{run}_test_unpivot.png")
+        plt.close(fig)
 
 
 def _get_loss_dfs(run_data) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -1167,6 +1207,7 @@ def _plot_train_val_loss(
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
         plt.tight_layout()
         fig.savefig(f"{save_dir}/train_val_{k}.png")
+        plt.close(fig)
 
 
 def _get_run_data(run_dirs):
@@ -1340,6 +1381,7 @@ def main():
         )
         plt.tight_layout()
         fig.savefig(f"{save_dir}/anomalous_{m}.png")
+        plt.close(fig)
 
     # NOTE:
     # plotting anomalous peak heights
@@ -1374,6 +1416,7 @@ def main():
         ax.grid()
         plt.tight_layout()
         fig.savefig(f"{save_dir}/anomalous_iod_{s}_model_peaks.png")
+        plt.close(fig)
 
     # Plotting Fano binned by resolution
     run_data.values()
@@ -1434,6 +1477,7 @@ def main():
         ax.grid()
         plt.tight_layout()
         fig.savefig(f"test_out/run_{r}_fano.png")
+        plt.close(fig)
     # END TODO
 
     # %%
@@ -1517,6 +1561,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/var_qi_mean_models_res_bin.png")
+    plt.close(fig)
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1533,6 +1578,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/var_qi_var_models_res_bin.png")
+    plt.close(fig)
 
     # per epoch
     # binned by ersolution
@@ -1548,6 +1594,9 @@ def main():
     # Per epoch
     # binned by resolution
     for r in run_ids:
+        out_dir = save_dir / f"{r}"
+        out_dir.mkdir(exist_ok=True)
+
         df_ = df_map[r]
         model_name = run_data[r]["model_metadata"]["qi_name"]
         _plot_per_epoch_metric(
@@ -1558,7 +1607,7 @@ def main():
             x_key="bin_id",
             y_key="mean_qi_var",
             title=f"Mean qi.var over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_mean_qi_var_resbin_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_mean_qi_var_resbin_per_epoch.png",
             epochs=epochs,
             y_scale="log",
         )
@@ -1570,7 +1619,7 @@ def main():
             x_key="bin_id",
             y_key="fano",
             title=f"Mean fano over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_mean_fano_resbin_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_mean_fano_resbin_per_epoch.png",
             epochs=epochs,
             y_scale="log",
         )
@@ -1582,7 +1631,7 @@ def main():
             x_key="bin_id",
             y_key="var_qi_mean",
             title=f"Mean var(qi.var) over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_var_qi_var_resbin_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_var_qi_var_resbin_per_epoch.png",
             epochs=epochs,
             y_scale="log",
         )
@@ -1629,6 +1678,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/mean_qi_mean_models_intensity_bins.png")
+    plt.close(fig)
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1644,6 +1694,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/mean_fano_models_intensity_bins.png")
+    plt.close(fig)
 
     # Plotting variance(qi.mean)
 
@@ -1661,6 +1712,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+    plt.close(fig)
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1676,6 +1728,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+    plt.close(fig)
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1692,6 +1745,7 @@ def main():
     )
     plt.tight_layout()
     fig.savefig(f"{save_dir}/var_qi_var_models_intensity_bins.png")
+    plt.close(fig)
 
     # TODO:
     # Per epoch metrics
@@ -1705,6 +1759,9 @@ def main():
     )
 
     for r in run_ids:
+        out_dir = save_dir / f"{r}"
+        out_dir.mkdir(exist_ok=True)
+
         df_ = df_map[r]
         model_name = run_data[r]["model_metadata"]["qi_name"]
         _plot_per_epoch_metric(
@@ -1715,7 +1772,7 @@ def main():
             x_key="bin_id",
             y_key="mean_qi_var",
             title=f"Mean qi.var over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_mean_qi_var_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_mean_qi_var_per_epoch.png",
             epochs=epochs,
         )
         _plot_per_epoch_metric(
@@ -1726,7 +1783,7 @@ def main():
             x_key="bin_id",
             y_key="fano",
             title=f"Mean fano over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_mean_fano_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_mean_fano_per_epoch.png",
             epochs=epochs,
         )
         _plot_per_epoch_metric(
@@ -1737,7 +1794,7 @@ def main():
             x_key="bin_id",
             y_key="var_qi_mean",
             title=f"Mean var(qi.var) over epoch for model {model_name}",
-            fname=f"{save_dir}/run_{r}_var_qi_var_per_epoch.png",
+            fname=f"{out_dir}/run_{r}_var_qi_var_per_epoch.png",
             epochs=epochs,
         )
 
@@ -1780,6 +1837,7 @@ def main():
     # DataFrame of merging stats
     merging_stat_df = _get_merging_stat_df(run_data=run_data)
 
+    # Merging stats out_dir
     # Plot merging stats for each run
     _plot_merging_stats(
         run_ids=run_ids,
@@ -1820,19 +1878,9 @@ def main():
         linewidth=2,
         figsize=(8, 5),
         save_dir=save_dir,
+        ref_path=reference_paths["phenix_refine_log"],
     )
 
 
 if __name__ == "__main__":
     main()
-# %%
-
-n_samples = 1900000
-tp = 0.7
-train_size = int(tp * n_samples)
-batch_size = 1024
-desired_steps = 50000
-
-n_steps_epoch = train_size / batch_size
-
-n_epochs_to_use = desired_steps / n_steps_epoch
