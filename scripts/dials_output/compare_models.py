@@ -1260,6 +1260,7 @@ def _get_save_dir(args, run_data):
     # use user-specified save_dir if passed
     if args.save_dir is not None:
         save_dir = Path(args.save_dir)
+        save_dir.mkdir(exist_ok=True)
 
     elif n_models > 1:
         raise ValueError(
