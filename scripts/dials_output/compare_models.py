@@ -395,13 +395,14 @@ def _plot_anomalous_metric(
     fig, ax = plt.subplots(figsize=set_figsize())
     palette = _get_palette(run_ids)
     for r in run_ids:
-        label = run_data[r]["model_metadata"]["qi_name"]
+        model_name = run_data[r]["model_metadata"]["qi_name"]
+        label = f"{model_name}_{r}"
         lf = peak_lf.filter(pl.col("run_id") == r)
         df = lf.collect()
         df = epoch_df.join(df, on="epoch", how="left").sort("epoch")
         ax.plot(df["epoch"], df[metric], label=label, color=palette[r])
     if reference_data is not None:
-        ax.axhline(ref_lf[metric].to_list(), c="red", label="DIALS")
+        ax.axhline(ref_lf[metric].item(), c="red", label="DIALS")
     ax.set_xlabel("epoch")
     ax.set_ylabel(f"{metric}")
     ax.set_title(f"{metric} over epochs")
@@ -1251,7 +1252,7 @@ def _plot_r_values(
 
     # plot line style
     dashes = {
-        "start": (2, 2),
+        "start": (2, 1),
         "final": "",
     }
     if ref_path is not None:
@@ -1313,17 +1314,22 @@ def _get_loss_dfs(run_data) -> tuple[pl.DataFrame, pl.DataFrame]:
     train_loss_dfs = []
 
     for v in run_data.values():
+        run_id = v["run_id"]
+        model_name = v["model_name"]
+        label = f"{model_name}_{run_id}"
         val_loss_dfs.append(
             _get_val_loss(v["loss_df"]).with_columns(
-                run_id=pl.lit(v["run_id"]),
-                name=pl.lit(v["model_name"]),
+                run_id=pl.lit(run_id),
+                name=pl.lit(model_name),
+                label=pl.lit(label),
                 Stage=pl.lit("val"),
             )
         )
         train_loss_dfs.append(
             _get_train_loss(v["loss_df"]).with_columns(
-                run_id=pl.lit(v["run_id"]),
-                name=pl.lit(v["model_name"]),
+                run_id=pl.lit(run_id),
+                name=pl.lit(model_name),
+                label=pl.lit(label),
                 Stage=pl.lit("train"),
             )
         )
@@ -1339,13 +1345,12 @@ def _plot_loss_gap(
     metric,
     save_dir,
 ):
-    # TODO: Modify so that `model_name` is in the legend
     fig, ax = plt.subplots(figsize=set_figsize())
     sns.lineplot(
         data=loss_gap_df,
         x="epoch",
         y=metric,
-        hue="run_id",
+        hue="label",
         palette="Dark2",
     )
     ax.grid()
@@ -1384,11 +1389,11 @@ def _get_long_loss_df(
 ) -> pl.DataFrame:
     val_long_ = val_loss_df.unpivot(
         ["val nll", "val kl", "val elbo"],
-        index=["run_id", "epoch", "Stage"],
+        index=["run_id", "epoch", "Stage", "label"],
     )
     train_long_ = train_loss_df.unpivot(
         ["train nll", "train kl", "train elbo"],
-        index=["run_id", "epoch", "Stage"],
+        index=["run_id", "epoch", "Stage", "label"],
     )
     long_loss_df = val_long_.vstack(train_long_)
     return long_loss_df
@@ -1407,12 +1412,12 @@ def _plot_train_val_loss(
     long_loss_df: pl.DataFrame,
     save_dir: str | Path,
 ):
-    run_ids = long_loss_df["run_id"].unique()
-    palette = _get_palette(run_ids=run_ids)
+    labels = long_loss_df["label"].unique().to_list()
+    palette = _get_palette(labels)
 
     # plot line style
     dashes = {
-        "val": ":",
+        "val": (2, 1),
         "train": "",
     }
 
@@ -1432,7 +1437,7 @@ def _plot_train_val_loss(
             data=plot_df,
             x="epoch",
             y="value",
-            hue="run_id",  # color by run_id
+            hue="label",  # color by label (model_name_run_id)
             style="Stage",  # Stage is train or val
             palette=palette,
             dashes=dashes,
@@ -1748,7 +1753,7 @@ def main():
         ax.grid()
 
         fig.savefig(
-            f"test_out/run_{r}_fano.png",
+            f"{save_dir}/run_{r}_fano.png",
             transparent=True,
             dpi=300,
             facecolor="white",
@@ -2074,30 +2079,6 @@ def main():
         x_label="intensity bin",
         y_label="mean qi.mean",
         x_key="bin_id",
-        y_key="var_qi_mean",
-    )
-
-    fig.savefig(
-        f"{save_dir}/var_qi_mean_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
-
-    # Plotting mean fano
-    fig, ax = _plot_metric(
-        run_ids=run_ids,
-        df_map=df_map,
-        base_df=base_df,
-        run_data=run_data,
-        title="Mean fano over resolution bin",
-        x_label="intensity bin",
-        y_label="mean qi.mean",
-        x_key="bin_id",
         y_key="var_qi_var",
         y_scale=True,
     )
@@ -2250,5 +2231,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    import numpy as np
