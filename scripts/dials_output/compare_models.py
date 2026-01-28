@@ -43,9 +43,6 @@ sns.set_theme(
     font_scale=1.0,  # IMPORTANT: don’t rescale fonts
 )
 
-
-COLORS = ["#E69F00 ", "#56B4E9", "#009E73", "#F0E442", "#0072B2"]
-
 COLORS = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e"]
 
 CATEGORICAL_HEX_COLORS = {}
@@ -256,6 +253,8 @@ def _plot_metric(
     labels = base_df["bin_labels"].to_list()
     ticks = base_df["bin_id"].to_list()
 
+    palette = _get_palette(run_ids)
+
     for r in run_ids:
         df_ = df_map[r]
         # iterate over each epoch
@@ -268,6 +267,7 @@ def _plot_metric(
             df[x_key],
             df[y_key],
             label=f"{model_name}_{r}",
+            color=palette[r],
         )
 
     ax.set_xlabel(x_label)
@@ -394,12 +394,13 @@ def _plot_anomalous_metric(
         ).collect()
 
     fig, ax = plt.subplots(figsize=set_figsize())
+    palette = _get_palette(run_ids)
     for r in run_ids:
         label = run_data[r]["model_metadata"]["qi_name"]
         lf = peak_lf.filter(pl.col("run_id") == r)
         df = lf.collect()
         df = epoch_df.join(df, on="epoch", how="left").sort("epoch")
-        ax.plot(df["epoch"], df[metric], label=label)
+        ax.plot(df["epoch"], df[metric], label=label, color=palette[r])
     if reference_data is not None:
         ax.axhline(ref_lf[metric].to_list(), c="red", label="DIALS")
     ax.set_xlabel("epoch")
@@ -1647,6 +1648,7 @@ def main():
     # NOTE:
     # plotting anomalous peak heights
     ref_peak_df = ref_peak_lf.collect()
+    palette = _get_palette(run_ids)
     for s in seqids:
         # reference peak
         ref_peak = ref_peak_df.filter(pl.col("seqid") == s)["peakz"].item()
@@ -1665,6 +1667,7 @@ def main():
                 x=df["epoch"],
                 y=df["peakz"],
                 label=label,
+                color=palette[rid],
                 ax=ax,
             )
 
@@ -2215,11 +2218,11 @@ def main():
 
     # Plotting merging statistics for each run
     # NOTE: Turn off for faster run time
-    _plot_run_merging_stats(
-        run_ids=run_ids,
-        pred_lf=pred_lf,
-        save_dir=save_dir,
-    )
+    # _plot_run_merging_stats(
+    #     run_ids=run_ids,
+    #     pred_lf=pred_lf,
+    #     save_dir=save_dir,
+    # )
 
     # Getting correlation df
     corr_df = _get_corr_df(pred_lf)
