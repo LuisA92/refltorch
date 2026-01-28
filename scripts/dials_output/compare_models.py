@@ -48,8 +48,8 @@ def set_mpl_fonts(base_pt):
 
 def set_figsize(
     fraction=1.0,
-    ratio=0.75,
-    textwidth_pt=None,
+    ratio=6.0,
+    textwidth_pt=452.9679,
     paper="a4",
 ):
     # article, 1in margins
@@ -118,7 +118,7 @@ def plot_fano_over_epoch(
     cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
     colors = cmap(np.linspace(0, 1, n_epochs))
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=set_figsize())
 
     for e, c in zip(epochs, colors):
         data = fano_df.filter(pl.col("epoch") == e)
@@ -243,7 +243,8 @@ def _plot_metric(
     y_scale: bool | None = None,
 ):
     # plotting the mean qi_var per model
-    fig, ax = plt.subplots(figsize=(10, 8))
+
+    fig, ax = plt.subplots(figsize=set_figsize(ratio=0.6, textwidth_pt=452.9679))
     labels = base_df["bin_labels"].to_list()
     ticks = base_df["bin_id"].to_list()
 
@@ -265,6 +266,7 @@ def _plot_metric(
     ax.set_xticks(ticks)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylabel(y_label)
+
     ax.set_title(title)
     if y_scale is not None:
         ax.set_yscale("log")
@@ -291,7 +293,7 @@ def _plot_per_epoch_metric(
     cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
     colors = cmap(np.linspace(0, 1, n_epochs))
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=set_figsize())
 
     for c, e in zip(colors, epochs):
         df_ = df.filter(pl.col("epoch") == e)
@@ -369,9 +371,7 @@ def _plot_anomalous_metric(
             median_signal=pl.col("peakz").median(),
         ).collect()
 
-    fig, ax = plt.subplots(
-        figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-    )
+    fig, ax = plt.subplots(figsize=set_figsize())
     for r in run_ids:
         label = run_data[r]["model_metadata"]["qi_name"]
         lf = peak_lf.filter(pl.col("run_id") == r)
@@ -652,7 +652,7 @@ def _plot_merging_stats(
         sm.set_array([])
 
         # setting up figure
-        fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+        fig, axs = plt.subplots(2, 2, figsize=set_figsize())
         axs = axs.ravel()
 
         # cchalf plot
@@ -772,9 +772,7 @@ def _plot_correlations(
         sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
-        fig, ax = plt.subplots(
-            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-        )
+        fig, ax = plt.subplots(figsize=set_figsize())
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -796,9 +794,7 @@ def _plot_correlations(
 
         # Plotting background correlation
 
-        fig, ax = plt.subplots(
-            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-        )
+        fig, ax = plt.subplots(figsize=set_figsize())
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -819,9 +815,7 @@ def _plot_correlations(
         plt.close(fig)
 
         # Plotting var(I) correlation
-        fig, ax = plt.subplots(
-            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-        )
+        fig, ax = plt.subplots(figsize=set_figsize())
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -961,7 +955,7 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ) * pad
             y_min = df_epoch.select(pl.min("intensity.prf.value")).item() * pad
 
-            fig, ax = plt.subplots(figsize=(5, 5))
+            fig, ax = plt.subplots(figsize=set_figsize())
 
             sns.scatterplot(
                 data=df_epoch,
@@ -1001,7 +995,7 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
 
             y_min = df_epoch.select(pl.min(bg_dials_key)).item()
 
-            fig, ax = plt.subplots(figsize=(5, 5))
+            fig, ax = plt.subplots(figsize=set_figsize())
             sns.scatterplot(
                 data=df_epoch,
                 x=bg_model_key,
@@ -1038,7 +1032,7 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ) * pad
             y_min = df_epoch.select(pl.min(i_var_dials_key)).item() * pad
 
-            fig, ax = plt.subplots(figsize=(5, 5))
+            fig, ax = plt.subplots(figsize=set_figsize())
             sns.scatterplot(
                 data=df_epoch,
                 x="qi_var",
@@ -1073,7 +1067,6 @@ def _plot_r_values(
     long_df: pl.DataFrame,
     save_dir: str | Path,
     linewidth: int = 2,
-    figsize: tuple[int, int] = (8, 5),
     ref_path: Path | None = None,
 ):
     # plot color
@@ -1097,7 +1090,7 @@ def _plot_r_values(
         out_dir = save_dir
         out_dir.mkdir(exist_ok=True)
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=set_figsize())
 
         sns.lineplot(
             data=run_df,
@@ -1167,9 +1160,7 @@ def _plot_loss_gap(
     save_dir,
 ):
     # TODO: Modify so that `model_name` is in the legend
-    fig, ax = plt.subplots(
-        figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-    )
+    fig, ax = plt.subplots(figsize=set_figsize())
     sns.lineplot(
         data=loss_gap_df,
         x="epoch",
@@ -1215,16 +1206,21 @@ def _get_long_loss_df(
     return long_loss_df
 
 
+def _get_palette(run_ids) -> dict:
+    if len(run_ids) in CATEGORICAL_HEX_COLORS:
+        hex_colors = CATEGORICAL_HEX_COLORS[len(run_ids)]
+        return dict(zip(run_ids, hex_colors))
+    else:
+        c_pallete = sns.color_palette("Dark2")
+        return {run_id: c for run_id, c in zip(run_ids, c_pallete)}
+
+
 def _plot_train_val_loss(
     long_loss_df: pl.DataFrame,
     save_dir: str | Path,
 ):
     run_ids = long_loss_df["run_id"].unique()
-
-    # FIX: Handle case when len(run_ids) is not a valid key
-    hex_colors = CATEGORICAL_HEX_COLORS[len(run_ids)]
-
-    palette = dict(zip(run_ids, hex_colors))
+    palette = _get_palette(run_ids=run_ids)
 
     # plot line style
     dashes = {
@@ -1243,15 +1239,13 @@ def _plot_train_val_loss(
         plot_df = long_loss_df.filter(pl.col("variable").is_in(v))
         ymin = plot_df["value"].min()
 
-        fig, ax = plt.subplots(
-            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
-        )
+        fig, ax = plt.subplots(figsize=set_figsize())
         sns.lineplot(
             data=plot_df,
             x="epoch",
             y="value",
-            hue="run_id",  # color = model
-            style="Stage",  # linestyle = train/val
+            hue="run_id",  # color by run_id
+            style="Stage",  # Stage is train or val
             palette=palette,
             dashes=dashes,
             linewidth=2,
@@ -1453,7 +1447,7 @@ def main():
         # reference peak
         ref_peak = ref_peak_df.filter(pl.col("seqid") == s)["peakz"].item()
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=set_figsize())
         df_seq = lf.filter(pl.col("seqid") == s).collect().sort(["epoch", "seqid"])
 
         for rid in run_ids:
@@ -1527,7 +1521,7 @@ def main():
         )
         cmap_list = cmap(np.linspace(0.0, 1, len(epochs), retstep=True)[0])
 
-        fig, ax = plt.subplots(figsize=(7, 5))
+        fig, ax = plt.subplots(figsize=set_figsize())
         for c, ((e,), lf_epoch) in zip(
             cmap_list,
             lf_.group_by("epoch", maintain_order=True),
@@ -1939,7 +1933,6 @@ def main():
     _plot_r_values(
         long_df=long_df,
         linewidth=2,
-        figsize=(8, 5),
         save_dir=save_dir,
         ref_path=reference_paths["phenix_refine_log"],
     )
