@@ -21,21 +21,6 @@ logger = logging.getLogger(__name__)
 # Setup mpl config for consistent plotting
 setup_mpl_config()
 
-sns.set_theme(
-    context="paper",  # correct for LaTeX
-    style="ticks",
-    font_scale=1.0,  # IMPORTANT: don’t rescale fonts
-)
-
-# Based off https://carbondesignsystem.com/data-visualization/color-palettes/
-CATEGORICAL_HEX_COLORS = {
-    1: ["#002d9c"],
-    2: ["#009d9a", "#002d9c"],
-    3: ["#a56eff", "#005d5d", "#002d9c"],
-    4: ["#009d9a", "#002d9c", "#a56eff", "#9f1853"],
-    5: ["#6929c4", "#1192e8", "#005d5d", "#9f1853", "#570408"],
-}
-
 
 def set_mpl_fonts(base_pt):
     import matplotlib as mpl
@@ -52,8 +37,25 @@ def set_mpl_fonts(base_pt):
     )
 
 
+sns.set_theme(
+    context="paper",  # correct for LaTeX
+    style="ticks",
+    font_scale=1.0,  # IMPORTANT: don’t rescale fonts
+)
+
+
+COLORS = ["#E69F00 ", "#56B4E9", "#009E73", "#F0E442", "#0072B2"]
+
+COLORS = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e"]
+
+CATEGORICAL_HEX_COLORS = {}
+for k, v in enumerate(COLORS):
+    key = k + 1
+    CATEGORICAL_HEX_COLORS[key] = COLORS[:key]
+
+
 def set_figsize(
-    fraction=1.0,
+    fraction=0.6,
     ratio=0.6,
     textwidth_pt=452.9679,
     paper="a4",
@@ -273,10 +275,16 @@ def _plot_metric(
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylabel(y_label)
 
+    labels = ax.get_xticklabels()
+    for i, label in enumerate(labels):
+        if i % 2 != 0:
+            label.set_visible(False)
+
     ax.set_title(title)
     if y_scale is not None:
         ax.set_yscale("log")
     ax.legend()
+    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
     ax.grid()
     return fig, ax
 
@@ -316,7 +324,15 @@ def _plot_per_epoch_metric(
     ax.set_title(title)
     if y_scale is not None:
         ax.set_yscale(y_scale)
-    fig.savefig(fname)
+    fig.savefig(
+        fname,
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
 
@@ -387,7 +403,7 @@ def _plot_anomalous_metric(
     if reference_data is not None:
         ax.axhline(ref_lf[metric].to_list(), c="red", label="DIALS")
     ax.set_xlabel("epoch")
-    ax.set_ylabel(metric)
+    ax.set_ylabel(f"{metric}")
     ax.set_title(f"{metric} over epochs")
     ax.legend()
     sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
@@ -558,8 +574,16 @@ def _plot_anom_peak_stats(
             reference_data=ref_peak_lf,
             metric=m,
         )
-        plt.tight_layout()
-        fig.savefig(f"{save_dir}/anomalous_{m}.png")
+
+        fig.savefig(
+            f"{save_dir}/anomalous_{m}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
     pass
@@ -637,6 +661,7 @@ def _plot_merging_stats(
     ref_merge_stats_df,
     save_dir: Path,
 ):
+    im_frac = 0.6
     out_dir = save_dir
     out_dir.mkdir(exist_ok=True)
 
@@ -657,11 +682,10 @@ def _plot_merging_stats(
         sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
-        # setting up figure
-        fig, axs = plt.subplots(2, 2, figsize=set_figsize())
-        axs = axs.ravel()
-
         # cchalf plot
+        # setting up figure
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+
         sns.lineplot(
             data=df_,
             x="resolution",
@@ -670,14 +694,38 @@ def _plot_merging_stats(
             palette=cmap,
             hue_norm=norm,
             legend=False,
-            ax=axs[0],
+            ax=ax,
         )
-        axs[0].plot(ref_merge_stats_df["cchalf"], label="DIALS", color="red")
-        axs[0].set_xticklabels(axs[0].get_xticklabels(), rotation=45)
-        axs[0].set_xlabel("Resolution bin")
-        axs[0].set_ylabel("CChalf")
+        ax.plot(ref_merge_stats_df["cchalf"], label="DIALS", color="red")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
+        ax.set_xlabel("Resolution bin")
+        ax.set_ylabel("CChalf")
+        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label("Epoch", rotation=90)
+        ax.legend()
+        ax.grid(alpha=0.5)
+        ax.set_title(f"{model_name}")
+
+        fig.savefig(
+            f"{out_dir}/merging_stats.cchalf.run_{run}.model_{model_name}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+        plt.close(fig)
 
         # rpim plot
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+
         sns.lineplot(
             data=df_,
             x="resolution",
@@ -686,15 +734,39 @@ def _plot_merging_stats(
             palette=cmap,
             hue_norm=norm,
             legend=False,
-            ax=axs[1],
+            ax=ax,
         )
-        axs[1].plot(ref_merge_stats_df["rpim"], label="DIALS", color="red")
-        axs[1].set_xticklabels(axs[1].get_xticklabels(), rotation=45)
-        axs[1].set_xlabel("Resolution bin")
-        axs[1].set_ylabel("Rpim")
-        axs[1].grid(alpha=0.5)
+        ax.plot(ref_merge_stats_df["rpim"], label="DIALS", color="red")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
+        ax.set_xlabel("Resolution bin")
+        ax.set_ylabel("Rpim")
+        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+        ax.grid(alpha=0.5)
+        ax.set_title(f"{model_name}")
+
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label("Epoch", rotation=90)
+        ax.legend()
+
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        fig.savefig(
+            f"{out_dir}/merging_stats.rpim.run_{run}.model_{model_name}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
+        plt.close(fig)
 
         # isigi plot
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+
         sns.lineplot(
             data=df_,
             x="resolution",
@@ -703,14 +775,38 @@ def _plot_merging_stats(
             palette=cmap,
             hue_norm=norm,
             legend=False,
-            ax=axs[2],
+            ax=ax,
         )
-        axs[2].plot(ref_merge_stats_df["meani_sigi"], label="DIALS", color="red")
-        axs[2].set_xticklabels(axs[2].get_xticklabels(), rotation=45)
-        axs[2].set_xlabel("Resolution bin")
-        axs[2].set_ylabel("I/Sig(I)")
+        ax.plot(ref_merge_stats_df["meani_sigi"], label="DIALS", color="red")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
+        ax.set_xlabel("Resolution bin")
+        ax.set_ylabel("I/Sig(I)")
+        ax.set_title(f"{model_name}")
+        ax.grid(alpha=0.5)
+        ax.set_yticks([0.0, 25, 50, 75, 100, 125])
+
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label("Epoch", rotation=90)
+        ax.legend()
+
+        fig.savefig(
+            f"{out_dir}/merging_stats.isigi.run_{run}.model_{model_name}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+        plt.close(fig)
 
         # ccanom plot
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+
         sns.lineplot(
             data=df_,
             x="resolution",
@@ -719,23 +815,32 @@ def _plot_merging_stats(
             palette=cmap,
             hue_norm=norm,
             legend=False,
-            ax=axs[3],
+            ax=ax,
         )
-        axs[3].plot(ref_merge_stats_df["ccanom"], label="DIALS", color="red")
-        axs[3].set_xticklabels(axs[3].get_xticklabels(), rotation=45)
-        axs[3].set_xlabel("Resolution bin")
-        axs[3].set_ylabel("CCanom")
+        ax.plot(ref_merge_stats_df["ccanom"], label="DIALS", color="red")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
+        ax.set_xlabel("Resolution bin")
+        ax.set_ylabel("CCanom")
+        ax.set_title(f"{model_name}")
+        ax.set_yticks([-0.5, -0.25, 0.0, 0.25])
 
-        for ax in axs:
-            cbar = plt.colorbar(sm, ax=ax)
-            cbar.set_label("Epoch", rotation=90)
-            ax.legend()
-            ax.grid(0.5)
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
 
-        plt.suptitle(f"Merging statistics\n{model_name}\nwb id: {run_id}")
-        plt.tight_layout()
-
-        fig.savefig(f"{out_dir}/merging_stats_run_{run}_model_{model_name}.png")
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label("Epoch", rotation=90)
+        ax.legend()
+        ax.grid(alpha=0.5)
+        fig.savefig(
+            f"{out_dir}/merging_stats.ccanom.run_{run}.model_{model_name}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
         plt.close(fig)
 
 
@@ -794,8 +899,20 @@ def _plot_correlations(
         cbar = plt.colorbar(sm, ax=ax)
         cbar.set_label("Epoch", rotation=90)
 
-        plt.tight_layout()
-        fig.savefig(f"{out_dir}/run_{run}_dials_corr_I.png")
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        fig.savefig(
+            f"{out_dir}/run_{run}_dials_corr_I.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
         # Plotting background correlation
@@ -816,8 +933,20 @@ def _plot_correlations(
         cbar = plt.colorbar(sm, ax=ax)
         cbar.set_label("Epoch", rotation=90)
 
-        plt.tight_layout()
-        fig.savefig(f"{out_dir}/run_{run}_dials_corr_bg.png")
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        fig.savefig(
+            f"{out_dir}/run_{run}_dials_corr_bg.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
         # Plotting var(I) correlation
@@ -837,8 +966,20 @@ def _plot_correlations(
         cbar = plt.colorbar(sm, ax=ax)
         cbar.set_label("Epoch", rotation=90)
 
-        plt.tight_layout()
-        fig.savefig(f"{out_dir}/run_{run}_dials_corr_var_I.png")
+        labels = ax.get_xticklabels()
+        for i, label in enumerate(labels):
+            if i % 2 != 0:
+                label.set_visible(False)
+
+        fig.savefig(
+            f"{out_dir}/run_{run}_dials_corr_var_I.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
 
@@ -985,8 +1126,16 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ax.set_yscale("symlog")
             ax.set_xscale("symlog")
             ax.grid()
-            plt.tight_layout()
-            fig.savefig(f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png")
+
+            fig.savefig(
+                f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png",
+                transparent=True,
+                dpi=300,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.02,
+            )
+
             plt.close(fig)
 
             # Plotting dials bg vs model bg
@@ -1022,8 +1171,16 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ax.set_ylim(ymin=y_min, ymax=x_max)
             ax.set_ylabel(bg_dials_key)
             ax.grid()
-            plt.tight_layout()
-            fig.savefig(f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png")
+
+            fig.savefig(
+                f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png",
+                transparent=True,
+                dpi=300,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.02,
+            )
+
             plt.close(fig)
 
             # Plotting dials var(I) vs model var(I)
@@ -1064,11 +1221,20 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ax.set_yscale("log")
             ax.set_xscale("log")
             ax.grid()
-            plt.tight_layout()
-            fig.savefig(f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png")
+
+            fig.savefig(
+                f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png",
+                transparent=True,
+                dpi=300,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.02,
+            )
+
             plt.close(fig)
 
 
+# FIX: Modify to plot the start/final rvalues as two separate plots
 def _plot_r_values(
     long_df: pl.DataFrame,
     save_dir: str | Path,
@@ -1129,8 +1295,16 @@ def _plot_r_values(
         ax.set_title(f"R-values vs epoch\nrun_id: {run}")
         ax.grid()
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-        plt.tight_layout()
-        fig.savefig(f"{out_dir}/run_{run}_test_unpivot.png")
+
+        fig.savefig(
+            f"{out_dir}/run_{run}_test_unpivot.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
 
@@ -1176,9 +1350,17 @@ def _plot_loss_gap(
     )
     ax.grid()
     ax.legend()
+    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
     ax.set_title(f"Train/Val {metric} gap")
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/train_val_{metric}.png")
+
+    plt.savefig(
+        f"{save_dir}/train_val_{metric}.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
 
 
 def _get_loss_gap_df(train_loss_df, val_loss_df) -> pl.DataFrame:
@@ -1266,8 +1448,16 @@ def _plot_train_val_loss(
             ax.set_ylim(ymax=2000)
         ax.set_ylim(ymin=ymin)
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-        plt.tight_layout()
-        fig.savefig(f"{save_dir}/train_val_{k}.png")
+
+        fig.savefig(
+            f"{save_dir}/train_val_{k}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
 
@@ -1442,8 +1632,16 @@ def main():
             reference_data=ref_peak_lf,
             metric=m,
         )
-        plt.tight_layout()
-        fig.savefig(f"{save_dir}/anomalous_{m}.png")
+
+        fig.savefig(
+            f"{save_dir}/anomalous_{m}.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
     # NOTE:
@@ -1461,7 +1659,7 @@ def main():
             df = epoch_df.join(df, on="epoch", how="left").sort(["epoch", "seqid"])
 
             # use surrogate prior name as label
-            label = run_data[rid]["model_metadata"]["qi_name"]
+            label = f"{run_data[rid]['model_metadata']['qi_name']}_{rid}"
 
             sns.lineplot(
                 x=df["epoch"],
@@ -1477,8 +1675,16 @@ def main():
         ax.legend()
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
         ax.grid()
-        plt.tight_layout()
-        fig.savefig(f"{save_dir}/anomalous_iod_{s}_model_peaks.png")
+
+        fig.savefig(
+            f"{save_dir}/anomalous_iod_{s}_model_peaks.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
 
     # Plotting Fano binned by resolution
@@ -1538,8 +1744,16 @@ def main():
         ax.set_xticklabels(joined["bin_labels"], rotation=45, ha="right")
         ax.set_ylabel("fano")
         ax.grid()
-        plt.tight_layout()
-        fig.savefig(f"test_out/run_{r}_fano.png")
+
+        fig.savefig(
+            f"test_out/run_{r}_fano.png",
+            transparent=True,
+            dpi=300,
+            facecolor="white",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+
         plt.close(fig)
     # END TODO
 
@@ -1574,8 +1788,16 @@ def main():
         x_key="bin_id",
         y_key="mean_qi_var",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/all_runs.mean_qi_var.binnned_by_res.png")
+
+    fig.savefig(
+        f"{save_dir}/all_runs.mean_qi_var.binnned_by_res.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean qi.mean
@@ -1590,8 +1812,16 @@ def main():
         x_key="bin_id",
         y_key="mean_qi_mean",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/all_runs.mean_qi_var.binned_by_{bin_label}.png")
+
+    fig.savefig(
+        f"{save_dir}/all_runs.mean_qi_var.binned_by_{bin_label}.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1606,8 +1836,16 @@ def main():
         x_key="bin_id",
         y_key="fano",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/all_runs.mean_fano.binned_by_resolution.png")
+
+    fig.savefig(
+        f"{save_dir}/all_runs.mean_fano.binned_by_resolution.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1622,8 +1860,16 @@ def main():
         x_key="bin_id",
         y_key="var_qi_mean",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/var_qi_mean_models_res_bin.png")
+
+    fig.savefig(
+        f"{save_dir}/var_qi_mean_models_res_bin.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1639,8 +1885,16 @@ def main():
         y_key="var_qi_var",
         y_scale=True,
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/var_qi_var_models_res_bin.png")
+
+    fig.savefig(
+        f"{save_dir}/var_qi_var_models_res_bin.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # per epoch
@@ -1665,11 +1919,11 @@ def main():
         _plot_per_epoch_metric(
             df_,
             base_df=base_df,
-            x_label="bin",
-            y_label="",
+            x_label="resolution bin",
+            y_label="mean(qi.var)",
             x_key="bin_id",
             y_key="mean_qi_var",
-            title=f"Mean qi.var over epoch for model {model_name}",
+            title=f"Mean qi.var over epoch\nmodel {model_name}",
             fname=f"{out_dir}/run_{r}_mean_qi_var_resbin_per_epoch.png",
             epochs=epochs,
             y_scale="log",
@@ -1677,8 +1931,8 @@ def main():
         _plot_per_epoch_metric(
             df_,
             base_df=base_df,
-            x_label="bin",
-            y_label="",
+            x_label="resolution bin",
+            y_label="mean(fano)",
             x_key="bin_id",
             y_key="fano",
             title=f"Mean fano over epoch for model {model_name}",
@@ -1689,11 +1943,11 @@ def main():
         _plot_per_epoch_metric(
             df_,
             base_df=base_df,
-            x_label="bin",
-            y_label="",
+            x_label="resolution_bin",
+            y_label="Mean var(qi.mean)",
             x_key="bin_id",
             y_key="var_qi_mean",
-            title=f"Mean var(qi.var) over epoch for model {model_name}",
+            title=f"Mean var(qi.mean) over epoch for model {model_name}",
             fname=f"{out_dir}/run_{r}_var_qi_var_resbin_per_epoch.png",
             epochs=epochs,
             y_scale="log",
@@ -1724,8 +1978,15 @@ def main():
         x_key="bin_id",
         y_key="mean_qi_var",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/mean_qi_var_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/mean_qi_var_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
 
     # Plotting mean qi.mean
     fig, ax = _plot_metric(
@@ -1739,8 +2000,16 @@ def main():
         x_key="bin_id",
         y_key="mean_qi_mean",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/mean_qi_mean_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/mean_qi_mean_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1755,8 +2024,16 @@ def main():
         x_key="bin_id",
         y_key="fano",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/mean_fano_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/mean_fano_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting variance(qi.mean)
@@ -1773,8 +2050,16 @@ def main():
         x_key="bin_id",
         y_key="var_qi_mean",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/var_qi_mean_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1789,8 +2074,16 @@ def main():
         x_key="bin_id",
         y_key="var_qi_mean",
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/var_qi_mean_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/var_qi_mean_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # Plotting mean fano
@@ -1806,8 +2099,16 @@ def main():
         y_key="var_qi_var",
         y_scale=True,
     )
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/var_qi_var_models_intensity_bins.png")
+
+    fig.savefig(
+        f"{save_dir}/var_qi_var_models_intensity_bins.png",
+        transparent=True,
+        dpi=300,
+        facecolor="white",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
     plt.close(fig)
 
     # TODO:
@@ -1913,6 +2214,7 @@ def main():
     pred_lf = _get_pred_lf(run_data=run_data)
 
     # Plotting merging statistics for each run
+    # NOTE: Turn off for faster run time
     _plot_run_merging_stats(
         run_ids=run_ids,
         pred_lf=pred_lf,
@@ -1946,3 +2248,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    import numpy as np
