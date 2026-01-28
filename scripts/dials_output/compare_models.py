@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 # Setup mpl config for consistent plotting
 setup_mpl_config()
 
+sns.set_theme(
+    context="paper",  # correct for LaTeX
+    style="ticks",
+    font_scale=1.0,  # IMPORTANT: don’t rescale fonts
+)
+
 # Based off https://carbondesignsystem.com/data-visualization/color-palettes/
 CATEGORICAL_HEX_COLORS = {
     1: ["#002d9c"],
@@ -48,7 +54,7 @@ def set_mpl_fonts(base_pt):
 
 def set_figsize(
     fraction=1.0,
-    ratio=6.0,
+    ratio=0.6,
     textwidth_pt=452.9679,
     paper="a4",
 ):
