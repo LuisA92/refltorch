@@ -21,6 +21,53 @@ logger = logging.getLogger(__name__)
 # Setup mpl config for consistent plotting
 setup_mpl_config()
 
+# Based off https://carbondesignsystem.com/data-visualization/color-palettes/
+CATEGORICAL_HEX_COLORS = {
+    1: ["#002d9c"],
+    2: ["#009d9a", "#002d9c"],
+    3: ["#a56eff", "#005d5d", "#002d9c"],
+    4: ["#009d9a", "#002d9c", "#a56eff", "#9f1853"],
+    5: ["#6929c4", "#1192e8", "#005d5d", "#9f1853", "#570408"],
+}
+
+
+def set_mpl_fonts(base_pt):
+    import matplotlib as mpl
+
+    mpl.rcParams.update(
+        {
+            "font.size": base_pt,
+            "axes.labelsize": base_pt,
+            "xtick.labelsize": base_pt - 1,
+            "ytick.labelsize": base_pt - 1,
+            "legend.fontsize": base_pt - 1,
+            "axes.titlesize": base_pt + 1,
+        }
+    )
+
+
+def set_figsize(
+    fraction=1.0,
+    ratio=0.75,
+    textwidth_pt=None,
+    paper="a4",
+):
+    # article, 1in margins
+    if textwidth_pt is None:
+        if paper.lower() == "a4":
+            textwidth_pt = 452.97  # ~6.26 in
+        elif paper.lower() == "letter":
+            textwidth_pt = 468.0  #  ~6.48 in
+        else:
+            raise ValueError(f"Unknown paper type: {paper}")
+
+    inches_per_pt = 1.0 / 72.27
+
+    fig_width = textwidth_pt * inches_per_pt * fraction
+    fig_height = fig_width * ratio
+
+    return fig_width, fig_height
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -322,7 +369,9 @@ def _plot_anomalous_metric(
             median_signal=pl.col("peakz").median(),
         ).collect()
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(
+        figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+    )
     for r in run_ids:
         label = run_data[r]["model_metadata"]["qi_name"]
         lf = peak_lf.filter(pl.col("run_id") == r)
@@ -673,7 +722,7 @@ def _plot_merging_stats(
 
         for ax in axs:
             cbar = plt.colorbar(sm, ax=ax)
-            cbar.set_label("Epoch", fontsize=8, rotation=90)
+            cbar.set_label("Epoch", rotation=90)
             ax.legend()
             ax.grid(0.5)
 
@@ -723,7 +772,9 @@ def _plot_correlations(
         sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(
+            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+        )
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -737,7 +788,7 @@ def _plot_correlations(
         ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
         ax.grid()
         cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", fontsize=8, rotation=90)
+        cbar.set_label("Epoch", rotation=90)
 
         plt.tight_layout()
         fig.savefig(f"{out_dir}/run_{run}_dials_corr_I.png")
@@ -745,7 +796,9 @@ def _plot_correlations(
 
         # Plotting background correlation
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(
+            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+        )
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -759,14 +812,16 @@ def _plot_correlations(
         ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
         ax.grid()
         cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", fontsize=8, rotation=90)
+        cbar.set_label("Epoch", rotation=90)
 
         plt.tight_layout()
         fig.savefig(f"{out_dir}/run_{run}_dials_corr_bg.png")
         plt.close(fig)
 
         # Plotting var(I) correlation
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(
+            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+        )
         sns.lineplot(
             data=df_run,
             x="d_bins",
@@ -780,7 +835,7 @@ def _plot_correlations(
         ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
         ax.grid()
         cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", fontsize=8, rotation=90)
+        cbar.set_label("Epoch", rotation=90)
 
         plt.tight_layout()
         fig.savefig(f"{out_dir}/run_{run}_dials_corr_var_I.png")
@@ -1112,7 +1167,9 @@ def _plot_loss_gap(
     save_dir,
 ):
     # TODO: Modify so that `model_name` is in the legend
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(
+        figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+    )
     sns.lineplot(
         data=loss_gap_df,
         x="epoch",
@@ -1162,10 +1219,12 @@ def _plot_train_val_loss(
     long_loss_df: pl.DataFrame,
     save_dir: str | Path,
 ):
-    c_pallete = sns.color_palette("Dark2")
-    palette = {
-        run_id: c for run_id, c in zip(long_loss_df["run_id"].unique(), c_pallete)
-    }
+    run_ids = long_loss_df["run_id"].unique()
+
+    # FIX: Handle case when len(run_ids) is not a valid key
+    hex_colors = CATEGORICAL_HEX_COLORS[len(run_ids)]
+
+    palette = dict(zip(run_ids, hex_colors))
 
     # plot line style
     dashes = {
@@ -1184,7 +1243,9 @@ def _plot_train_val_loss(
         plot_df = long_loss_df.filter(pl.col("variable").is_in(v))
         ymin = plot_df["value"].min()
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(
+            figsize=set_figsize(fraction=1.0, ratio=0.6, textwidth_pt=452.9679)
+        )
         sns.lineplot(
             data=plot_df,
             x="epoch",
@@ -1277,6 +1338,7 @@ def _get_save_dir(args, run_data):
 
 
 def main():
+    set_mpl_fonts(10.95)
     args = parse_args()
     setup_logging(args.verbose)
 
