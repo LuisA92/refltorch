@@ -257,7 +257,6 @@ def _plot_metric(
 
     for r in run_ids:
         df_ = df_map[r]
-        # iterate over each epoch
 
         df = base_df.join(df_, on="bin_labels", how="left").sort("bin_id")
 
@@ -685,7 +684,7 @@ def _plot_merging_stats(
 
         # cchalf plot
         # setting up figure
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
 
         sns.lineplot(
             data=df_,
@@ -725,7 +724,7 @@ def _plot_merging_stats(
         plt.close(fig)
 
         # rpim plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
 
         sns.lineplot(
             data=df_,
@@ -766,7 +765,7 @@ def _plot_merging_stats(
         plt.close(fig)
 
         # isigi plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
 
         sns.lineplot(
             data=df_,
@@ -806,7 +805,7 @@ def _plot_merging_stats(
         plt.close(fig)
 
         # ccanom plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac, ratio=0.5))
+        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
 
         sns.lineplot(
             data=df_,
@@ -1413,7 +1412,7 @@ def _plot_train_val_loss(
 
     # plot line style
     dashes = {
-        "val": (2, 2),
+        "val": ":",
         "train": "",
     }
 
