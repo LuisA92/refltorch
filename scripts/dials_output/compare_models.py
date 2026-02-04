@@ -51,6 +51,15 @@ for k, v in enumerate(COLORS):
     CATEGORICAL_HEX_COLORS[key] = COLORS[:key]
 
 
+def _get_palette(ids) -> dict:
+    if len(ids) in CATEGORICAL_HEX_COLORS:
+        hex_colors = CATEGORICAL_HEX_COLORS[len(ids)]
+        return dict(zip(ids, hex_colors))
+    else:
+        c_pallete = sns.color_palette("Dark2")
+        return {run_id: c for run_id, c in zip(ids, c_pallete)}
+
+
 def set_figsize(
     fraction=0.6,
     ratio=0.6,
@@ -384,6 +393,7 @@ def _plot_anomalous_metric(
 ):
     # set up reference data if provided
     if reference_data is not None:
+        reference_data = reference_data.filter(pl.col("seqid").is_in([204, 205, 206]))
         ref_lf = reference_data.select(
             total_signal=pl.col("peakz").sum(),
             mean_signal=pl.col("peakz").mean(),
@@ -527,67 +537,6 @@ def _get_reference_merging_stats(reference_paths):
         ref_merge_stats_df = get_dials_merging_stats(ref_tbl2).collect()
 
     return ref_merge_stats_df
-
-
-def _plot_anom_peak_stats(
-    lf,
-):
-    epochs = (
-        lf.select(pl.col("epoch").unique().sort())
-        .collect()
-        .get_column("epoch")
-        .to_list()
-    )
-
-    # TODO: Add seqids to args list of peak sequence ids to analyze
-    seqids = [204, 205, 206]
-
-    # epoch_df
-    epoch_df = pl.DataFrame({"epoch": epochs})
-
-    # filter for anomalous residues
-    anom_residues = ["IOD", "MET", "CYS"]
-
-    # NOTE:
-    # peak summary stats
-    peak_lf = lf.filter(pl.col("residue").is_in(anom_residues))
-    peak_lf = peak_lf.group_by(pl.col(["epoch", "run_id"])).agg(
-        total_signal=pl.col("peakz").sum(),
-        mean_signal=pl.col("peakz").mean(),
-        max_signal=pl.col("peakz").max(),
-        min_signal=pl.col("peakz").min(),
-        median_signal=pl.col("peakz").median(),
-    )
-    # Plotting aggregated anomalous metrics
-    metrics = [
-        "total_signal",
-        "mean_signal",
-        "max_signal",
-        "min_signal",
-        "median_signal",
-    ]
-    for m in metrics:
-        fig, ax = _plot_anomalous_metric(
-            peak_lf=peak_lf,
-            run_ids=run_ids,
-            epoch_df=epoch_df,
-            run_data=run_data,
-            reference_data=ref_peak_lf,
-            metric=m,
-        )
-
-        fig.savefig(
-            f"{save_dir}/anomalous_{m}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
-
-    pass
 
 
 def _get_peak_lf(
@@ -1001,6 +950,7 @@ def _get_rval_df(
                     "run_id": run,
                     "epoch": epoch,
                     "fname": f.as_posix(),
+                    "model_name": run_data[run]["model_name"],
                     **rvals,
                 },
             )
@@ -1022,6 +972,7 @@ def _get_rval_long_df(
         index=[
             "run_id",
             "epoch",
+            "model_name",
         ],
     )
 
@@ -1031,12 +982,15 @@ def _get_rval_long_df(
             pl.when(pl.col("variable").str.contains("work"))
             .then(pl.lit("r_work"))
             .otherwise(pl.lit("r_free"))
-            .alias("metric"),
+            .alias("Metric"),
             pl.when(pl.col("variable").str.contains("final"))
             .then(pl.lit("final"))
             .otherwise(pl.lit("start"))
             .alias("stage"),
         ]
+    )
+    long_df = long_df.with_columns(
+        Label=pl.col("model_name") + "_" + pl.col("run_id"),
     )
     return long_df
 
@@ -1239,26 +1193,29 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
 def _plot_r_values(
     long_df: pl.DataFrame,
     save_dir: str | Path,
-    linewidth: int = 2,
+    linewidth: int = 1,
     ref_path: Path | None = None,
 ):
-    # plot color
+    # getting color palette
+    run_ids = long_df["run_id"].unique().to_list()
+    plot_ids = ["r_work", "r_free"]
 
-    c_pallete = sns.color_palette("Dark2")
-    palette = {
-        "r_work": "black",
-        "r_free": "blue",
-    }
+    palette = _get_palette(long_df["Label"].unique().to_list())
 
     # plot line style
-    dashes = {
-        "start": (2, 1),
-        "final": "",
-    }
+    dashes = {"r_free": (2, 1), "r_work": ""}
+
     if ref_path is not None:
         ref_vals = _get_r_vals(ref_path)
 
+    # iterate over grouped dataframes
     for (run,), run_df in long_df.group_by(pl.col("run_id")):
+        # plot only final r-values
+        run_df = run_df.filter(pl.col("stage") == "final")
+
+        # title
+        title = f"Final refinement values vs epoch\nmodel: {run_df['Label'].unique().to_list()[0]}"
+
         # out dir
         out_dir = save_dir
         out_dir.mkdir(exist_ok=True)
@@ -1269,8 +1226,8 @@ def _plot_r_values(
             data=run_df,
             x="epoch",
             y="value",
-            hue="metric",
-            style="stage",
+            hue="Label",
+            style="Metric",
             palette=palette,
             dashes=dashes,
             linewidth=linewidth,
@@ -1281,24 +1238,27 @@ def _plot_r_values(
             assert isinstance(ref_vals, dict)
             ax.axhline(
                 ref_vals["r_work_final"],
-                color="red",
+                color="#cc0000",
                 label="DIALS rwork final",
             )
             ax.axhline(
                 ref_vals["r_free_final"],
-                color="red",
+                color="#cc0000",
                 linestyle="--",
                 label="DIALS rfree final",
             )
 
         ax.set_xlabel("epoch")
         ax.set_ylabel("r value")
-        ax.set_title(f"R-values vs epoch\nrun_id: {run}")
+        ax.set_title(title)
         ax.grid()
-        sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
+        # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
+        ax.get_legend().remove()
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1, 1))
 
         fig.savefig(
-            f"{out_dir}/run_{run}_test_unpivot.png",
+            f"{out_dir}/refinement_values_final_run_{run}.png",
             transparent=True,
             dpi=300,
             facecolor="white",
@@ -1397,15 +1357,6 @@ def _get_long_loss_df(
     )
     long_loss_df = val_long_.vstack(train_long_)
     return long_loss_df
-
-
-def _get_palette(run_ids) -> dict:
-    if len(run_ids) in CATEGORICAL_HEX_COLORS:
-        hex_colors = CATEGORICAL_HEX_COLORS[len(run_ids)]
-        return dict(zip(run_ids, hex_colors))
-    else:
-        c_pallete = sns.color_palette("Dark2")
-        return {run_id: c for run_id, c in zip(run_ids, c_pallete)}
 
 
 def _plot_train_val_loss(
@@ -1612,7 +1563,7 @@ def main():
 
     # NOTE:
     # peak summary stats
-    peak_lf = lf.filter(pl.col("residue").is_in(anom_residues))
+    peak_lf = lf.filter(pl.col("seqid").is_in([204, 205, 206]))
     peak_lf = peak_lf.group_by(pl.col(["epoch", "run_id"])).agg(
         total_signal=pl.col("peakz").sum(),
         mean_signal=pl.col("peakz").mean(),
