@@ -1,14 +1,14 @@
-"""Scatter plots of model vs DIALS quantities, faceted by resolution bin.
+"""Scatter plots of model vs DIALS quantities, faceted by group_label.
+
+Uses the group_label column written during prediction (same resolution bins
+the model trained with) rather than re-binning.  Falls back to binning by
+d-spacing if group_label is not in the parquets.
 
 Usage:
     python scatter_by_bin.py \
-        --preds-dir /path/to/predictions/ \
-        --save-dir  /path/to/output/ \
-        [--epoch 74] \
-        [--edges 1.1 1.3 1.5 1.8 2.0 2.5 3.0]
-
-If --epoch is omitted, uses the latest epoch found.
-If --edges is omitted, uses the DIALS_EDGES_9B7C default.
+        --run-dir /path/to/run_dir/ \
+        --save-dir /path/to/output/ \
+        [--epoch 74]
 """
 
 import argparse
@@ -21,15 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-DIALS_EDGES_9B7C = [
-    1.1, 1.14, 1.18, 1.23, 1.30, 1.49, 1.64, 2.06, 2.97,
-]
-
-REQUIRED_COLS = [
-    "epoch", "d",
-    "qi_mean", "qi_var", "qbg_mean",
-    "intensity.prf.value", "intensity.prf.variance", "background.mean",
-]
+from refltorch.io import load_config
 
 SCATTER_DEFS = [
     {
@@ -56,32 +48,17 @@ SCATTER_DEFS = [
 ]
 
 
-def _make_bin_labels(edges: list[float]) -> list[str]:
-    labels = [f"< {edges[0]:.2f}"]
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        labels.append(f"{lo:.2f}-{hi:.2f}")
-    labels.append(f"> {edges[-1]:.2f}")
-    return labels
-
-
-def _assign_bins(df: pl.DataFrame, edges: list[float]) -> pl.DataFrame:
-    labels = _make_bin_labels(edges)
-    return df.with_columns(
-        pl.col("d")
-        .cut(edges, labels=labels)
-        .alias("d_bin")
-    )
-
-
 def _plot_scatter_grid(
     df: pl.DataFrame,
-    bins: list[str],
+    bin_col: str,
+    bin_values: list,
+    bin_labels: list[str],
     x: str, y: str,
     xlabel: str, ylabel: str,
     title: str,
     save_path: Path,
 ):
-    n_bins = len(bins)
+    n_bins = len(bin_values)
     ncols = min(4, n_bins)
     nrows = (n_bins + ncols - 1) // ncols
 
@@ -91,15 +68,15 @@ def _plot_scatter_grid(
         squeeze=False,
     )
 
-    for idx, bname in enumerate(bins):
+    for idx, (bval, blabel) in enumerate(zip(bin_values, bin_labels)):
         ax = axes[idx // ncols][idx % ncols]
-        sub = df.filter(pl.col("d_bin") == bname)
+        sub = df.filter(pl.col(bin_col) == bval)
 
         # Filter positive values for log-log
         sub = sub.filter((pl.col(x) > 0) & (pl.col(y) > 0))
 
         if len(sub) == 0:
-            ax.set_title(f"{bname}\n(n=0)")
+            ax.set_title(f"{blabel}\n(n=0)")
             ax.set_visible(False)
             continue
 
@@ -111,12 +88,13 @@ def _plot_scatter_grid(
 
         # x=y line
         vals = np.concatenate([sub[x].to_numpy(), sub[y].to_numpy()])
-        lo, hi = vals[vals > 0].min() * 0.5, vals.max() * 2
+        pos = vals[vals > 0]
+        lo, hi = pos.min() * 0.5, pos.max() * 2
         ax.plot([lo, hi], [lo, hi], c="red", alpha=0.5, lw=1)
 
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_title(f"d: {bname}\n(n={len(sub):,})", fontsize=10)
+        ax.set_title(f"{blabel}\n(n={len(sub):,})", fontsize=10)
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.2)
@@ -135,73 +113,104 @@ def _plot_scatter_grid(
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--preds-dir", type=Path, required=True,
-        help="Directory containing epoch_*/preds_*.parquet files",
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--save-dir", type=Path, required=True,
-        help="Output directory for plots",
+        "--run-dir", type=Path, required=True,
+        help="Path to run directory containing run_metadata.yaml",
+    )
+    parser.add_argument(
+        "--save-dir", type=Path, default=None,
+        help="Output directory for plots (default: <wandb_log>/plots/scatter_by_bin)",
     )
     parser.add_argument(
         "--epoch", type=int, default=None,
         help="Epoch to plot (default: latest)",
     )
-    parser.add_argument(
-        "--edges", type=float, nargs="+", default=None,
-        help="Resolution bin edges in Angstroms (default: DIALS_EDGES_9B7C)",
-    )
     args = parser.parse_args()
 
-    edges = args.edges if args.edges is not None else DIALS_EDGES_9B7C
+    # Resolve paths from run_metadata.yaml
+    run_metadata = list(args.run_dir.glob("run_metadata.yaml"))[0]
+    config = load_config(run_metadata)
+    wandb_log = Path(config["wandb"]["log_dir"]).parent
+    preds_dir = wandb_log / "predictions"
+
+    if args.save_dir is not None:
+        save_dir = args.save_dir
+    else:
+        save_dir = wandb_log / "plots" / "scatter_by_bin"
 
     # Load predictions
-    parquets = sorted(args.preds_dir.glob("**/preds_*.parquet"))
+    parquets = sorted(preds_dir.glob("**/preds_*.parquet"))
     if not parquets:
-        raise FileNotFoundError(f"No parquet files found in {args.preds_dir}")
+        raise FileNotFoundError(f"No parquet files found in {preds_dir}")
     print(f"Found {len(parquets)} parquet files")
 
     df = pl.read_parquet(parquets)
-
-    # Check required columns
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"Missing columns: {missing}\n"
-            f"Available: {df.columns}\n"
-            f"Run add_d_to_parquet.py to add missing metadata columns."
-        )
+    print(f"Columns: {df.columns}")
 
     # Select epoch
-    epochs = sorted(df["epoch"].unique().to_list()) if "epoch" in df.columns else [0]
-    epoch = args.epoch if args.epoch is not None else max(epochs)
-    print(f"Plotting epoch {epoch} (available: {epochs})")
-    df = df.filter(pl.col("epoch") == epoch)
+    if "epoch" in df.columns:
+        epochs = sorted(df["epoch"].unique().to_list())
+        epoch = args.epoch if args.epoch is not None else max(epochs)
+        print(f"Plotting epoch {epoch} (available: {epochs})")
+        df = df.filter(pl.col("epoch") == epoch)
+    else:
+        epoch = 0
 
     # Filter positive variance
-    n_total = len(df)
-    df = df.filter(pl.col("intensity.prf.variance") > 0)
-    n_filtered = len(df)
-    print(f"Filtered to {n_filtered:,} / {n_total:,} reflections (var > 0)")
+    if "intensity.prf.variance" in df.columns:
+        n_total = len(df)
+        df = df.filter(pl.col("intensity.prf.variance") > 0)
+        print(f"Filtered to {len(df):,} / {n_total:,} reflections (var > 0)")
 
-    # Assign resolution bins
-    df = _assign_bins(df, edges)
-    bins = _make_bin_labels(edges)
+    # Get bin column
+    if "group_label" in df.columns:
+        bin_col = "group_label"
+        groups = sorted(df[bin_col].unique().to_list())
+        if "d" in df.columns:
+            bin_labels = []
+            for g in groups:
+                sub_d = df.filter(pl.col(bin_col) == g)["d"]
+                bin_labels.append(f"bin {g} (d: {sub_d.min():.2f}-{sub_d.max():.2f})")
+        else:
+            bin_labels = [f"bin {g}" for g in groups]
+        print(f"Using group_label with {len(groups)} bins")
+    elif "d" in df.columns:
+        # Fallback: quantile bins
+        n_bins = 10
+        quantiles = np.linspace(0, 1, n_bins + 1)[1:-1]
+        edges = np.quantile(df["d"].to_numpy(), quantiles).tolist()
+        bin_labels = [f"< {edges[0]:.2f}"]
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            bin_labels.append(f"{lo:.2f}-{hi:.2f}")
+        bin_labels.append(f"> {edges[-1]:.2f}")
+        df = df.with_columns(
+            pl.col("d").cut(edges, labels=bin_labels).alias("d_bin")
+        )
+        bin_col = "d_bin"
+        groups = bin_labels
+        print(f"Fallback: binned d into {len(groups)} quantile shells")
+    else:
+        raise ValueError("Need 'group_label' or 'd' column in parquets")
 
-    # Check which bins have data
-    bins_with_data = df["d_bin"].unique().to_list()
-    bins = [b for b in bins if b in bins_with_data]
-    print(f"Resolution bins with data: {len(bins)}")
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    args.save_dir.mkdir(parents=True, exist_ok=True)
-
+    # Filter scatter defs to available columns
     for sdef in SCATTER_DEFS:
-        save_path = args.save_dir / f"scatter_{sdef['tag']}_by_dbin_epoch_{epoch}.png"
+        if sdef["x"] not in df.columns or sdef["y"] not in df.columns:
+            print(f"  Skipping {sdef['tag']}: missing {sdef['x']} or {sdef['y']}")
+            continue
+
+        save_path = save_dir / f"scatter_{sdef['tag']}_by_bin_epoch_{epoch}.png"
         print(f"  Plotting {sdef['tag']}...")
         _plot_scatter_grid(
             df=df,
-            bins=bins,
+            bin_col=bin_col,
+            bin_values=groups,
+            bin_labels=bin_labels,
             x=sdef["x"],
             y=sdef["y"],
             xlabel=sdef["xlabel"],
