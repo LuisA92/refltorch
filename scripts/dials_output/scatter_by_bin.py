@@ -57,6 +57,7 @@ def _plot_scatter_grid(
     xlabel: str, ylabel: str,
     title: str,
     save_path: Path,
+    wilson_means: dict | None = None,
 ):
     n_bins = len(bin_values)
     ncols = min(4, n_bins)
@@ -92,9 +93,16 @@ def _plot_scatter_grid(
         lo, hi = pos.min() * 0.5, pos.max() * 2
         ax.plot([lo, hi], [lo, hi], c="red", alpha=0.5, lw=1)
 
+        # Wilson expected mean as vertical line
+        subtitle = f"n={len(sub):,}"
+        if wilson_means is not None and bval in wilson_means:
+            wm = wilson_means[bval]
+            ax.axvline(wm, color="blue", alpha=0.6, lw=1, ls="--")
+            subtitle += f" | E[I]={wm:.1f}"
+
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_title(f"{blabel}\n(n={len(sub):,})", fontsize=10)
+        ax.set_title(f"{blabel}\n{subtitle}", fontsize=9)
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.2)
@@ -198,11 +206,24 @@ def main():
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Compute Wilson expected mean per bin from tau_per_refl: E[I] = 1/tau
+    wilson_means = None
+    if "tau_per_refl" in df.columns and bin_col == "group_label":
+        wilson_means = {}
+        for g in groups:
+            tau = df.filter(pl.col(bin_col) == g)["tau_per_refl"].mean()
+            if tau is not None and tau > 0:
+                wilson_means[g] = 1.0 / tau
+        print(f"Wilson E[I] per bin: {[f'{wilson_means.get(g, 0):.1f}' for g in groups]}")
+
     # Filter scatter defs to available columns
     for sdef in SCATTER_DEFS:
         if sdef["x"] not in df.columns or sdef["y"] not in df.columns:
             print(f"  Skipping {sdef['tag']}: missing {sdef['x']} or {sdef['y']}")
             continue
+
+        # Only show Wilson mean on intensity plot
+        wm = wilson_means if sdef["tag"] == "intensity" else None
 
         save_path = save_dir / f"scatter_{sdef['tag']}_by_bin_epoch_{epoch}.png"
         print(f"  Plotting {sdef['tag']}...")
@@ -217,6 +238,7 @@ def main():
             ylabel=sdef["ylabel"],
             title=f"{sdef['xlabel']} vs {sdef['ylabel']} | Epoch {epoch}",
             save_path=save_path,
+            wilson_means=wm,
         )
         print(f"    Saved: {save_path}")
 
