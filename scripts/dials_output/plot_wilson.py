@@ -129,22 +129,22 @@ def _compute_wilson_stats(params: dict) -> dict:
 
 def _plot_tau_comparison(stats: dict, epoch: int, save_dir: Path):
     """Plot empirical vs Wilson-predicted tau as a function of resolution."""
-    d = stats["d_per_bin"]
+    s_sq = stats["s_sq"]
     tau_w = stats["tau_wilson"]
     tau_e = stats["tau_empirical"]
 
-    sort_idx = np.argsort(d)
-    d = d[sort_idx]
+    sort_idx = np.argsort(s_sq)
+    s_sq = s_sq[sort_idx]
     tau_w = tau_w[sort_idx]
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(d, tau_w, "o-", color="blue", label="Wilson predicted", markersize=4)
+    ax.plot(s_sq, tau_w, "o-", color="blue", label="Wilson predicted", markersize=4)
     if tau_e is not None:
         tau_e = tau_e[sort_idx]
-        ax.plot(d, tau_e, "s--", color="red", label="Empirical", markersize=4)
+        ax.plot(s_sq, tau_e, "s--", color="red", label="Empirical", markersize=4)
 
-    ax.set_xlabel("d-spacing ($\\AA$)")
+    ax.set_xlabel("$s^2 = 1/(4d^2)$ ($\\AA^{-2}$)")
     ax.set_ylabel("$\\tau$ (intensity prior rate)")
     ax.set_title(
         f"Wilson tau per resolution bin | Epoch {epoch}\n"
@@ -154,7 +154,13 @@ def _plot_tau_comparison(stats: dict, epoch: int, save_dir: Path):
     ax.set_yscale("log")
     ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.invert_xaxis()
+
+    # Add d-spacing as secondary x-axis
+    ax2 = ax.secondary_xaxis("top", functions=(
+        lambda s2: 1.0 / (2.0 * np.sqrt(np.maximum(s2, 1e-12))),
+        lambda d: 1.0 / (4.0 * d**2),
+    ))
+    ax2.set_xlabel("d-spacing ($\\AA$)")
 
     fig.savefig(
         save_dir / f"wilson_tau_epoch_{epoch}.png",
@@ -167,22 +173,20 @@ def _plot_tau_comparison(stats: dict, epoch: int, save_dir: Path):
 def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
     """Plot the Wilson curve: expected intensity Sigma = K * exp(-2B*s^2)."""
     s_sq_bins = stats["s_sq"]
-    d_bins = stats["d_per_bin"]
 
-    # Dense curve
-    s_sq_dense = np.linspace(0, s_sq_bins.max() * 1.1, 200)
-    d_dense = 1.0 / (2.0 * np.sqrt(s_sq_dense + 1e-12))
+    # Dense curve in s^2 space
+    s_sq_dense = np.linspace(s_sq_bins.min() * 0.9, s_sq_bins.max() * 1.1, 200)
     sigma_dense = stats["K_mean"] * np.exp(-2.0 * stats["B_mean"] * s_sq_dense)
 
     # Per-bin values
     sigma_bins = stats["K_mean"] * np.exp(-2.0 * stats["B_mean"] * s_sq_bins)
 
-    sort_idx = np.argsort(d_bins)
+    sort_idx = np.argsort(s_sq_bins)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(d_dense, sigma_dense, "-", color="blue", alpha=0.7, label="Wilson curve")
+    ax.plot(s_sq_dense, sigma_dense, "-", color="blue", alpha=0.7, label="Wilson curve")
     ax.plot(
-        d_bins[sort_idx], sigma_bins[sort_idx],
+        s_sq_bins[sort_idx], sigma_bins[sort_idx],
         "o", color="red", markersize=5, label="Bin centers",
     )
 
@@ -190,12 +194,12 @@ def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
     if stats["tau_empirical"] is not None:
         sigma_emp = 1.0 / stats["tau_empirical"]
         ax.plot(
-            d_bins[sort_idx], sigma_emp[sort_idx],
+            s_sq_bins[sort_idx], sigma_emp[sort_idx],
             "s", color="green", markersize=4,
             label="Empirical $\\Sigma$ (1/$\\tau$)",
         )
 
-    ax.set_xlabel("d-spacing ($\\AA$)")
+    ax.set_xlabel("$s^2 = 1/(4d^2)$ ($\\AA^{-2}$)")
     ax.set_ylabel("$\\Sigma$ (expected intensity)")
     ax.set_title(
         f"Wilson plot | Epoch {epoch}\n"
@@ -205,7 +209,13 @@ def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
     ax.set_yscale("log")
     ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.invert_xaxis()
+
+    # Add d-spacing as secondary x-axis
+    ax2 = ax.secondary_xaxis("top", functions=(
+        lambda s2: 1.0 / (2.0 * np.sqrt(np.maximum(s2, 1e-12))),
+        lambda d: 1.0 / (4.0 * d**2),
+    ))
+    ax2.set_xlabel("d-spacing ($\\AA$)")
 
     fig.savefig(
         save_dir / f"wilson_curve_epoch_{epoch}.png",
@@ -217,18 +227,23 @@ def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
 
 def _plot_bg_rate(stats: dict, epoch: int, save_dir: Path):
     """Plot background rate per resolution bin."""
-    d = stats["d_per_bin"]
+    s_sq = stats["s_sq"]
     bg = stats["bg_rate"]
 
-    sort_idx = np.argsort(d)
+    sort_idx = np.argsort(s_sq)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(d[sort_idx], bg[sort_idx], "o-", color="purple", markersize=4)
-    ax.set_xlabel("d-spacing ($\\AA$)")
+    ax.plot(s_sq[sort_idx], bg[sort_idx], "o-", color="purple", markersize=4)
+    ax.set_xlabel("$s^2 = 1/(4d^2)$ ($\\AA^{-2}$)")
     ax.set_ylabel("Background rate (per bin)")
     ax.set_title(f"Background prior rate per resolution bin | Epoch {epoch}")
     ax.grid(True, alpha=0.3)
-    ax.invert_xaxis()
+
+    ax2 = ax.secondary_xaxis("top", functions=(
+        lambda s2: 1.0 / (2.0 * np.sqrt(np.maximum(s2, 1e-12))),
+        lambda d: 1.0 / (4.0 * d**2),
+    ))
+    ax2.set_xlabel("d-spacing ($\\AA$)")
 
     fig.savefig(
         save_dir / f"bg_rate_per_bin_epoch_{epoch}.png",
