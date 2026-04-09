@@ -2160,12 +2160,11 @@ def main():
     pred_lf = _get_pred_lf(run_data=run_data)
 
     # Plotting merging statistics for each run
-    # NOTE: Turn off for faster run time
-    # _plot_run_merging_stats(
-    #     run_ids=run_ids,
-    #     pred_lf=pred_lf,
-    #     save_dir=save_dir,
-    # )
+    _plot_run_merging_stats(
+        run_ids=run_ids,
+        pred_lf=pred_lf,
+        save_dir=save_dir,
+    )
 
     # Getting correlation df
     corr_df = _get_corr_df(pred_lf)
