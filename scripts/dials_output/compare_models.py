@@ -1,3 +1,13 @@
+# Figures produced (saved to --save-dir):
+#   train_val_{elbo,nll,kl}.png          — training/validation loss curves
+#   train_val_{elbo,nll,kl}_gap.png      — train/val loss gap
+#   merging_stats.{cchalf,rpim,isigi,ccanom}.run_*.model_*.png — per-run merging stats
+#   anomalous_{total,mean,max,min,median}_signal.png — anomalous signal across epochs
+#   anomalous_iod_{204,205,206}_model_peaks.png      — per-residue peak heights
+#   refinement_values_final_run_*.png                 — R-work/R-free over epochs
+#
+# Requires: W&B run directories, DIALS merged.html, PHENIX refine*.log
+
 import argparse
 import logging
 import re
@@ -104,7 +114,7 @@ def parse_args():
         type=str,
         help="Path to save directory",
     )
-    parser.add_argument(
+    parseb.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -210,14 +220,15 @@ DIALS_EDGES_9B7C = [
 
 def _get_reference_metadata(run_config: dict) -> dict:
     cfg = load_config(run_config["config"])
+    loss_args = cfg["loss"]["args"]
     out = {
         "qbg_name": cfg["surrogates"]["qbg"]["name"],
         "qi_name": cfg["surrogates"]["qi"]["name"],
         "max_epochs": cfg["trainer"]["max_epochs"],
         "integrator_name": cfg["integrator"]["name"],
-        "pbg": cfg["loss"]["args"]["pbg_cfg"],
-        "pi": cfg["loss"]["args"]["pi_cfg"],
-        "pprf": cfg["loss"]["args"]["pprf_cfg"],
+        "pbg": loss_args.get("pbg_cfg"),
+        "pi": loss_args.get("pi_cfg"),
+        "pprf": loss_args.get("pprf_cfg"),
     }
     return out
 
