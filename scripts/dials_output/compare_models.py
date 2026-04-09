@@ -1031,7 +1031,6 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
     # Out directory
 
     # Plot hyper parameters
-    n_samples = 10_000
     pad = 2.0
     alpha = 0.4
     alpha2 = 0.5
@@ -1053,8 +1052,6 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
                     "background.mean",
                 ]
             )
-            .group_by("epoch", maintain_order=True)
-            .head(n_samples)
             .collect()
         )
 
