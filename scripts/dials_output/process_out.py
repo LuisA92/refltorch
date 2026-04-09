@@ -25,7 +25,7 @@ def parse_args():
     )
     parser.add_argument(
         "--save-dir",
-        type=str,
+        type=Path,
         help="Path to save directory",
     )
 
