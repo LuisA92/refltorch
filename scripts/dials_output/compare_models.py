@@ -1028,12 +1028,17 @@ def _get_pred_lf(
 
 
 def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
-    # Out directory
-
     # Plot hyper parameters
     pad = 2.0
-    alpha = 0.4
+    alpha = 0.15
     alpha2 = 0.5
+    dot_size = 3
+    figsize = (8, 8)
+
+    _save_kw = dict(
+        transparent=True, dpi=300, facecolor="white",
+        bbox_inches="tight", pad_inches=0.02,
+    )
 
     for run in run_ids:
         out_dir = save_dir / f"{run}"
@@ -1056,9 +1061,12 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
         )
 
         for (epoch,), df_epoch in df.group_by("epoch"):
-            # Getting max values
+            # Filter: positive DIALS variance only
+            df_good = df_epoch.filter(pl.col("intensity.prf.variance") > 0)
+            n_total = len(df_epoch)
+            n_good = len(df_good)
 
-            # Plotting dials I vs model I
+            # --- All reflections (symlog) ---
             x_max = (
                 df_epoch.select(pl.max("qi_mean", "intensity.prf.value"))
                 .max_horizontal()
@@ -1066,43 +1074,55 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             ) * pad
             y_min = df_epoch.select(pl.min("intensity.prf.value")).item() * pad
 
-            fig, ax = plt.subplots(figsize=set_figsize())
-
-            sns.scatterplot(
-                data=df_epoch,
-                x="qi_mean",
-                y="intensity.prf.value",
-                alpha=alpha,
-                ax=ax,
-                c="black",
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.scatter(
+                df_epoch["qi_mean"], df_epoch["intensity.prf.value"],
+                alpha=alpha, c="black", s=dot_size, edgecolors="none",
             )
-            ax.set_title(f"Run {run}\nEpoch {epoch}")
+            ax.plot([0, x_max], [0, x_max], c="red", alpha=alpha2)
+            ax.set_title(f"Run {run} | Epoch {epoch}\nAll reflections (n={n_total:,})")
             ax.set_xlabel("Model Intensity")
-            ax.plot(
-                [0, x_max],
-                [0, x_max],
-                c="red",
-                alpha=alpha2,
-            )
+            ax.set_ylabel("DIALS intensity.prf.value")
             ax.set_xlim(xmin=0.0, xmax=x_max)
             ax.set_ylim(ymin=y_min, ymax=x_max)
-            ax.set_ylabel("intensity.prf.value")
             ax.set_yscale("symlog")
             ax.set_xscale("symlog")
-            ax.grid()
-
-            fig.savefig(
-                f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png",
-                transparent=True,
-                dpi=300,
-                facecolor="white",
-                bbox_inches="tight",
-                pad_inches=0.02,
-            )
-
+            ax.grid(True, alpha=0.3)
+            fig.savefig(f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png", **_save_kw)
             plt.close(fig)
 
-            # Plotting dials bg vs model bg
+            # --- Filtered: positive variance only (log-log) ---
+            df_pos = df_good.filter(
+                (pl.col("qi_mean") > 0) & (pl.col("intensity.prf.value") > 0)
+            )
+            if len(df_pos) > 0:
+                x_max_f = (
+                    df_pos.select(pl.max("qi_mean", "intensity.prf.value"))
+                    .max_horizontal()
+                    .item()
+                ) * pad
+
+                fig, ax = plt.subplots(figsize=figsize)
+                ax.scatter(
+                    df_pos["qi_mean"], df_pos["intensity.prf.value"],
+                    alpha=alpha, c="black", s=dot_size, edgecolors="none",
+                )
+                ax.plot([1e-1, x_max_f], [1e-1, x_max_f], c="red", alpha=alpha2)
+                ax.set_title(
+                    f"Run {run} | Epoch {epoch}\n"
+                    f"Filtered: var>0 & I>0 (n={len(df_pos):,} / {n_total:,})"
+                )
+                ax.set_xlabel("Model Intensity")
+                ax.set_ylabel("DIALS intensity.prf.value")
+                ax.set_xscale("log")
+                ax.set_yscale("log")
+                ax.grid(True, alpha=0.3)
+                fig.savefig(
+                    f"{out_dir}/run_{run}_vs_dials_I_filtered_{epoch}.png", **_save_kw
+                )
+                plt.close(fig)
+
+            # --- Background ---
             bg_model_key = "qbg_mean"
             bg_dials_key = "background.mean"
 
@@ -1111,91 +1131,50 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
                 .max_horizontal()
                 .item()
             )
-
             y_min = df_epoch.select(pl.min(bg_dials_key)).item()
 
-            fig, ax = plt.subplots(figsize=set_figsize())
-            sns.scatterplot(
-                data=df_epoch,
-                x=bg_model_key,
-                y=bg_dials_key,
-                alpha=alpha,
-                ax=ax,
-                c="black",
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.scatter(
+                df_epoch[bg_model_key], df_epoch[bg_dials_key],
+                alpha=alpha, c="black", s=dot_size, edgecolors="none",
             )
-            ax.set_title(f"Run {run}\nEpoch {epoch}")
+            ax.plot([0, x_max], [0, x_max], c="red", alpha=alpha2)
+            ax.set_title(f"Run {run} | Epoch {epoch}")
             ax.set_xlabel("Model bg")
-            ax.plot(
-                [0, x_max],
-                [0, x_max],
-                c="red",
-                alpha=alpha2,
-            )
+            ax.set_ylabel(bg_dials_key)
             ax.set_xlim(xmin=0.0, xmax=x_max)
             ax.set_ylim(ymin=y_min, ymax=x_max)
-            ax.set_ylabel(bg_dials_key)
-            ax.grid()
-
-            fig.savefig(
-                f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png",
-                transparent=True,
-                dpi=300,
-                facecolor="white",
-                bbox_inches="tight",
-                pad_inches=0.02,
-            )
-
+            ax.grid(True, alpha=0.3)
+            fig.savefig(f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png", **_save_kw)
             plt.close(fig)
 
-            # Plotting dials var(I) vs model var(I)
-
-            i_var_model_key = "qi_var"
-            i_var_dials_key = "intensity.prf.variance"
-
-            x_max = (
-                df_epoch.select(pl.max(i_var_model_key, i_var_dials_key))
-                .max_horizontal()
-                .item()
-            ) * pad
-            y_min = df_epoch.select(pl.min(i_var_dials_key)).item() * pad
-
-            fig, ax = plt.subplots(figsize=set_figsize())
-            sns.scatterplot(
-                data=df_epoch,
-                x="qi_var",
-                y="intensity.prf.variance",
-                alpha=alpha,
-                ax=ax,
-                c="black",
-            )
-            ax.plot(
-                [0, x_max],
-                [0, x_max],
-                c="red",
-                alpha=alpha2,
-            )
-
-            ax.set_title(f"Run {run}\nEpoch {epoch}")
-            ax.set_xlabel("Model var(I)")
-            ax.set_ylabel("intensity.prf.variance")
-
-            # ax.set_xlim(xmin=0.0, xmax=x_max)
-            # ax.set_ylim(ymin=y_min, ymax=x_max)
-
-            ax.set_yscale("log")
-            ax.set_xscale("log")
-            ax.grid()
-
-            fig.savefig(
-                f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png",
-                transparent=True,
-                dpi=300,
-                facecolor="white",
-                bbox_inches="tight",
-                pad_inches=0.02,
-            )
-
-            plt.close(fig)
+            # --- Variance ---
+            df_var = df_good.filter(pl.col("qi_var") > 0)
+            if len(df_var) > 0:
+                fig, ax = plt.subplots(figsize=figsize)
+                ax.scatter(
+                    df_var["qi_var"], df_var["intensity.prf.variance"],
+                    alpha=alpha, c="black", s=dot_size, edgecolors="none",
+                )
+                x_max_v = (
+                    df_var.select(pl.max("qi_var", "intensity.prf.variance"))
+                    .max_horizontal()
+                    .item()
+                ) * pad
+                ax.plot([1e-1, x_max_v], [1e-1, x_max_v], c="red", alpha=alpha2)
+                ax.set_title(
+                    f"Run {run} | Epoch {epoch}\n"
+                    f"var>0 (n={len(df_var):,} / {n_total:,})"
+                )
+                ax.set_xlabel("Model var(I)")
+                ax.set_ylabel("intensity.prf.variance")
+                ax.set_xscale("log")
+                ax.set_yscale("log")
+                ax.grid(True, alpha=0.3)
+                fig.savefig(
+                    f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png", **_save_kw
+                )
+                plt.close(fig)
 
 
 # FIX: Modify to plot the start/final rvalues as two separate plots
