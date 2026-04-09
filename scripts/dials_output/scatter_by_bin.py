@@ -64,7 +64,7 @@ def _plot_scatter_grid(
 
     fig, axes = plt.subplots(
         nrows, ncols,
-        figsize=(5 * ncols, 5 * nrows),
+        figsize=(3 * ncols, 3 * nrows),
         squeeze=False,
     )
 
@@ -106,7 +106,7 @@ def _plot_scatter_grid(
     fig.suptitle(title, fontsize=14, y=1.01)
     fig.tight_layout()
     fig.savefig(
-        save_path, dpi=300, facecolor="white",
+        save_path, dpi=150, facecolor="white",
         bbox_inches="tight", pad_inches=0.05,
     )
     plt.close(fig)
