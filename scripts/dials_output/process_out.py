@@ -235,9 +235,9 @@ def _get_reference_metadata(run_config: dict) -> dict:
         "qi_name": cfg["surrogates"]["qi"]["name"],
         "max_epochs": cfg["trainer"]["max_epochs"],
         "integrator_name": cfg["integrator"]["name"],
-        "pbg": cfg["loss"]["args"]["pbg_cfg"],
-        "pi": cfg["loss"]["args"]["pi_cfg"],
-        "pprf": cfg["loss"]["args"]["pprf_cfg"],
+        "pbg": cfg["loss"]["args"].get("pbg_cfg"),
+        "pi": cfg["loss"]["args"].get("pi_cfg"),
+        "pprf": cfg["loss"]["args"].get("pprf_cfg"),
     }
     return out
 
