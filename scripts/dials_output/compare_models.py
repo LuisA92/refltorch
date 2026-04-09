@@ -114,7 +114,7 @@ def parse_args():
         type=str,
         help="Path to save directory",
     )
-    parseb.add_argument(
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
