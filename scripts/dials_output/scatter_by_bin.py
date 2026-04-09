@@ -211,9 +211,11 @@ def main():
     if "tau_per_refl" in df.columns and bin_col == "group_label":
         wilson_means = {}
         for g in groups:
-            tau = df.filter(pl.col(bin_col) == g)["tau_per_refl"].mean()
-            if tau is not None and tau > 0:
-                wilson_means[g] = 1.0 / tau
+            sub = df.filter(pl.col(bin_col) == g)
+            if len(sub) > 0:
+                tau = float(sub["tau_per_refl"][0])
+                if tau > 0:
+                    wilson_means[g] = 1.0 / tau
         print(f"Wilson E[I] per bin: {[f'{wilson_means.get(g, 0):.1f}' for g in groups]}")
 
     # Filter scatter defs to available columns
