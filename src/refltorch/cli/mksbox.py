@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from numpy.lib.format import open_memmap
 
 from refltorch.refl_utils import refl_as_pt
 
@@ -80,20 +81,35 @@ def parse_args():
     parser.add_argument(
         "--save-as-pt",
         action="store_true",
-        help="Flag to save as pytorch.pt files",
+        help="Also write stats and concentration .pt files alongside counts/masks .npy",
     )
     parser.add_argument(
         "--counts-fname",
         type=str,
-        default="counts.pt",
-        help="Name of the output counts.pt file",
+        default="counts.npy",
+        help="Name of the output counts file (memmap-backed .npy)",
     )
 
     parser.add_argument(
         "--masks-fname",
         type=str,
-        default="masks.pt",
-        help="Name of the output masks.pt file",
+        default="masks.npy",
+        help="Name of the output masks file (memmap-backed .npy)",
+    )
+
+    parser.add_argument(
+        "--counts-dtype",
+        type=str,
+        default="uint16",
+        choices=["uint16", "int32", "float32"],
+        help="Storage dtype for counts (uint16 halves RAM/disk vs float32)",
+    )
+
+    parser.add_argument(
+        "--stats-chunk",
+        type=int,
+        default=10_000,
+        help="Reflections per chunk when computing stats from the memmap",
     )
     return parser.parse_args()
 
@@ -133,72 +149,6 @@ def run_all_blocks(
             results.append(f.result())
 
     return results
-
-
-# def process_block(
-#     block_indices,
-#     bboxes,
-#     panels,
-#     refl_ids,
-#     expt_path,
-#     dz,
-#     dy,
-#     dx,
-# ):
-#     import numpy as np
-#     from dxtbx.model.experiment_list import ExperimentListFactory
-#
-#     experiments = ExperimentListFactory.from_json_file(expt_path)
-#     imageset = experiments[0].imageset
-#
-#     block_bboxes = bboxes[block_indices]
-#     z0_block = int(block_bboxes[:, 4].min())
-#     z1_block = int(block_bboxes[:, 5].max())
-#
-#     images = {}
-#
-#     for z in range(z0_block, z1_block):
-#         raw = imageset.get_raw_data(z)[0]  # flex array
-#         images[z] = raw.as_numpy_array()  # 2D numpy
-#
-#     n = len(block_indices)
-#     shoeboxes = np.zeros(
-#         (n, dz, dy, dx),
-#         dtype=images[z0_block].dtype,
-#     )
-#     mask = np.zeros((n, dz, dy, dx), dtype=bool)
-#
-#     for i, idx in enumerate(block_indices):
-#         x0, x1, y0, y1, z0, z1 = bboxes[idx]
-#
-#         z0_full = z0 - (dz - (z1 - z0)) // 2
-#         y0_full = y0 - (dy - (y1 - y0)) // 2
-#         x0_full = x0 - (dx - (x1 - x0)) // 2
-#
-#         oz0 = z0 - z0_full
-#         oy0 = y0 - y0_full
-#         ox0 = x0 - x0_full
-#
-#         for zz in range(z0, z1):
-#             img = images[zz]
-#             dz_idx = oz0 + (zz - z0)
-#
-#             shoeboxes[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = img[
-#                 y0:y1, x0:x1
-#             ]
-#
-#             mask[i, dz_idx, oy0 : oy0 + (y1 - y0), ox0 : ox0 + (x1 - x0)] = True
-#
-#     imageset.clear_cache()
-#     shoeboxes = shoeboxes.reshape(shoeboxes.shape[0], dz * dy * dx)
-#     mask = mask.reshape(mask.shape[0], dz * dy * dx)
-#
-#     return {
-#         "shoeboxes": shoeboxes,
-#         "mask": mask,
-#         "refl_ids": refl_ids[block_indices],
-#     }
-#
 
 
 def process_block(
@@ -334,97 +284,6 @@ def _get_bounding_boxes(
     return bbox
 
 
-# def _get_bounding_boxes(
-#     x,
-#     y,
-#     z,
-#     params,
-#     reflections,
-#     detector,
-#     frame0,
-#     frame1,
-# ):
-#     bbox = flex.int6(len(reflections))
-#     dx_det, dy_det = detector[0].get_image_size()
-#
-#     for j, (_x, _y, _z) in enumerate(zip(x, y, z)):
-#         # Calculate unclipped boundaries
-#         x0_full = _x - params.nx
-#         x1_full = _x + params.nx + 1
-#         y0_full = _y - params.ny
-#         y1_full = _y + params.ny + 1
-#         z0_full = _z - params.nz
-#         z1_full = _z + params.nz + 1
-#
-#         # Calculate full dimensions
-#         full_width_x = x1_full - x0_full
-#         full_width_y = y1_full - y0_full
-#         full_width_z = z1_full - z0_full
-#
-#         # Check if any boundary is outside detector/frame and adjust
-#         # X dimension adjustment
-#         if x0_full < 0:
-#             # Left edge is outside detector - shift right
-#             x_shift = -x0_full  # Amount to shift right
-#             x0 = 0
-#             x1 = min(dx_det, x0 + full_width_x)  # Try to maintain width
-#             # If still can't maintain full width, pad on left instead
-#             if x1 - x0 < full_width_x:
-#                 x1 = min(dx_det, x0_full + full_width_x)
-#         elif x1_full >= dx_det:
-#             # Right edge is outside detector - shift left
-#             x_shift = dx_det - x1_full  # Amount to shift left (negative)
-#             x1 = dx_det
-#             x0 = max(0, x1 - full_width_x)  # Try to maintain width
-#             # If still can't maintain full width, pad on right instead
-#             if x1 - x0 < full_width_x:
-#                 x0 = max(0, x1_full - full_width_x)
-#         else:
-#             # No adjustment needed
-#             x0 = x0_full
-#             x1 = x1_full
-#
-#         # Y dimension adjustment (similar to X)
-#         if y0_full < 0:
-#             y_shift = -y0_full
-#             y0 = 0
-#             y1 = min(dy_det, y0 + full_width_y)
-#             if y1 - y0 < full_width_y:
-#                 y1 = min(dy_det, y0_full + full_width_y)
-#         elif y1_full >= dy_det:
-#             y_shift = dy_det - y1_full
-#             y1 = dy_det
-#             y0 = max(0, y1 - full_width_y)
-#             if y1 - y0 < full_width_y:
-#                 y0 = max(0, y1_full - full_width_y)
-#         else:
-#             y0 = y0_full
-#             y1 = y1_full
-#
-#         # Z dimension adjustment (similar to X and Y)
-#         if z0_full < frame0:
-#             z_shift = frame0 - z0_full
-#             z0 = frame0
-#             z1 = min(frame1, z0 + full_width_z)
-#             if z1 - z0 < full_width_z:
-#                 z1 = min(frame1, z0_full + full_width_z)
-#         elif z1_full >= frame1:
-#             z_shift = frame1 - z1_full
-#             z1 = frame1
-#             z0 = max(frame0, z1 - full_width_z)
-#             if z1 - z0 < full_width_z:
-#                 z0 = max(frame0, z1_full - full_width_z)
-#         else:
-#             z0 = z0_full
-#             z1 = z1_full
-#
-#         bbox[j] = (x0, x1, y0, y1, z0, z1)
-#
-#     return bbox
-#
-#
-
-
 def _get_blocks(
     block_ids,
 ) -> list:
@@ -442,68 +301,75 @@ def _get_blocks(
     return blocks
 
 
-def _save_as_pt(
-    counts: torch.Tensor,
-    masks: torch.Tensor,
-    out_dir: Path,
-    counts_fname: str = "counts.pt",
-    masks_fname: str = "masks.pt",
-):
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # setting filenames
-    c = out_dir / counts_fname
-    m = out_dir / masks_fname
-
-    torch.save(counts, c)
-    torch.save(masks, m)
-
-
 def anscombe_transform(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     return 2 * (tensor + 0.375).sqrt()
 
 
-def _save_dirichlet_concentration(
-    counts: torch.Tensor,
+def _save_stats_from_memmap(
+    counts_path: Path,
+    masks_path: Path,
     out_dir: Path,
-    out_fname: str = "concentration.pt",
-):
-    concentration = counts.mean(1)
-    fname = out_dir / out_fname
-    torch.save(concentration, fname)
-
-
-def _save_stats(
-    counts: torch.Tensor,
-    masks: torch.Tensor,
-    out_dir: Path,
+    chunk: int = 10_000,
     ans_fname: str = "anscombe_stats.pt",
     stats_fname: str = "stats.pt",
 ):
-    # apply masks to data
-    counts = counts * masks
+    """Compute (mean, var) of masked counts and of their Anscombe transform
+    by streaming the on-disk memmap in chunks. Never loads the full array."""
+    counts = np.load(counts_path, mmap_mode="r")
+    masks = np.load(masks_path, mmap_mode="r")
+    n, d = counts.shape
 
-    # anscombe transform the raw counts
-    ans_transformed = anscombe_transform(counts)
-    ans_mean = ans_transformed.mean()
-    ans_var = ans_transformed.var()
-    ans_stats = torch.tensor([ans_mean, ans_var])
+    sum_c = 0.0
+    sumsq_c = 0.0
+    sum_a = 0.0
+    sumsq_a = 0.0
+    nel = 0
 
-    # get regular mean
-    mean = counts.mean()
-    var = counts.var()
-    stats = torch.tensor([mean, var])
+    for i in range(0, n, chunk):
+        c = counts[i : i + chunk].astype(np.float64)
+        m = masks[i : i + chunk]
+        c = c * m  # zero out masked pixels, matches prior semantics
+        a = 2.0 * np.sqrt(c + 0.375)
 
-    # Out filenames
-    ans_stats_fname = out_dir / ans_fname
-    s_fname = out_dir / stats_fname
+        sum_c += c.sum()
+        sumsq_c += (c * c).sum()
+        sum_a += a.sum()
+        sumsq_a += (a * a).sum()
+        nel += c.size
 
-    # Save stats
-    torch.save(ans_stats, ans_stats_fname)
-    torch.save(stats, s_fname)
+    mean_c = sum_c / nel
+    var_c = sumsq_c / nel - mean_c * mean_c
+    mean_a = sum_a / nel
+    var_a = sumsq_a / nel - mean_a * mean_a
+
+    torch.save(
+        torch.tensor([mean_c, var_c], dtype=torch.float32),
+        out_dir / stats_fname,
+    )
+    torch.save(
+        torch.tensor([mean_a, var_a], dtype=torch.float32),
+        out_dir / ans_fname,
+    )
+
+
+def _save_concentration_from_memmap(
+    counts_path: Path,
+    out_dir: Path,
+    chunk: int = 10_000,
+    out_fname: str = "concentration.pt",
+):
+    """Per-reflection mean over voxels, computed by streaming the memmap."""
+    counts = np.load(counts_path, mmap_mode="r")
+    n = counts.shape[0]
+
+    conc = np.empty(n, dtype=np.float32)
+    for i in range(0, n, chunk):
+        c = counts[i : i + chunk].astype(np.float32)
+        conc[i : i + chunk] = c.mean(axis=1)
+
+    torch.save(torch.from_numpy(conc), out_dir / out_fname)
 
 
 def main():
@@ -679,46 +545,69 @@ def main():
         dx=dx,
     )
 
-    # aggregate results
+    # aggregate results into on-disk memmaps — never materialize the full
+    # (N, dz*dy*dx) array in RAM. This is the fix for the OOM at large shoeboxes.
     N = len(refl_ids)
-    shoeboxes_all = np.zeros((N, dz * dy * dx), dtype=np.float32)
-    mask_all = np.zeros((N, dz * dy * dx), dtype=bool)
+    counts_path = out_dir / args.counts_fname
+    masks_path = out_dir / args.masks_fname
+
+    counts_dtype = np.dtype(args.counts_dtype)
+    shoeboxes_all = open_memmap(
+        counts_path,
+        mode="w+",
+        dtype=counts_dtype,
+        shape=(N, dz * dy * dx),
+    )
+    mask_all = open_memmap(
+        masks_path,
+        mode="w+",
+        dtype=np.bool_,
+        shape=(N, dz * dy * dx),
+    )
+
+    # uint16 overflow guard: warn once if any pixel exceeds its range
+    dtype_max = np.iinfo(counts_dtype).max if np.issubdtype(counts_dtype, np.integer) else None
+    clip_warned = False
 
     for res in results:
         ids = res["refl_ids"]
-        shoeboxes_all[ids] = res["shoeboxes"]
+        sbox = res["shoeboxes"]
+
+        if dtype_max is not None:
+            over = sbox > dtype_max
+            if over.any():
+                if not clip_warned:
+                    print(
+                        f"WARNING: {int(over.sum())} pixel(s) exceed {counts_dtype} max ({dtype_max}); "
+                        f"clipping. Consider --counts-dtype int32 if overloads matter to you."
+                    )
+                    clip_warned = True
+                sbox = np.clip(sbox, 0, dtype_max)
+
+        shoeboxes_all[ids] = sbox.astype(counts_dtype, copy=False)
         mask_all[ids] = res["mask"]
 
-    # to torch
-    counts = torch.from_numpy(shoeboxes_all)
-    masks = torch.from_numpy(mask_all)
+    shoeboxes_all.flush()
+    mask_all.flush()
+    del shoeboxes_all, mask_all
 
-    # save
+    # save metadata.pt file (reads from refl file, small)
+    refl_as_pt(
+        refl=refl_fname.as_posix(),
+        out_dir=out_dir,
+    )
+
     if args.save_as_pt:
-        # save counts.pt and masks.pt
-        _save_as_pt(
+        _save_stats_from_memmap(
+            counts_path=counts_path,
+            masks_path=masks_path,
             out_dir=out_dir,
-            counts=counts,
-            masks=masks,
-            counts_fname=args.counts_fname,
-            masks_fname=args.masks_fname,
+            chunk=args.stats_chunk,
         )
-        # save metadata.pt file
-        refl_as_pt(
-            refl=refl_fname.as_posix(),
+        _save_concentration_from_memmap(
+            counts_path=counts_path,
             out_dir=out_dir,
-        )
-
-        # save stats
-        _save_stats(
-            counts=counts,
-            masks=masks,
-            out_dir=out_dir,
-        )
-
-        _save_dirichlet_concentration(
-            counts=counts,
-            out_dir=out_dir,
+            chunk=args.stats_chunk,
         )
 
 
