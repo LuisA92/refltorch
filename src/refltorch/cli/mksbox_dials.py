@@ -130,8 +130,26 @@ def process_one_file(shoebox_path, chunk_idx, global_offset, out_chunks_dir, cou
 
     sbs = refl["shoebox"]
     for i, sb in enumerate(_tqdm(sbs, desc=f"chunk {chunk_idx:03d}")):
-        d = np.asarray(sb.data)
-        m = np.asarray(sb.mask).astype(np.int32)
+        # Derive (D, H, W) from the bbox — do NOT rely on np.asarray(sb.data).shape,
+        # which flattens flex arrays to 1D. bbox is (x0, x1, y0, y1, z0, z1).
+        x0, x1, y0, y1, z0, z1 = sb.bbox
+        D = int(z1 - z0)
+        H = int(y1 - y0)
+        W = int(x1 - x0)
+        V = D * H * W
+
+        d_flat = np.asarray(sb.data).ravel()
+        m_flat = np.asarray(sb.mask).ravel().astype(np.int32)
+
+        if d_flat.size != V:
+            raise RuntimeError(
+                f"shoebox {i} at bbox ({x0},{x1},{y0},{y1},{z0},{z1}): "
+                f"data has {d_flat.size} voxels, expected D*H*W = {V}"
+            )
+
+        # Reshape to 3D in (D, H, W) order — DIALS flex accessor is (nz, ny, nx)
+        d = d_flat.reshape(D, H, W)
+        m = m_flat.reshape(D, H, W)
 
         # Handle overflow on downcast to uint16
         if d.max() > dtype_max:
@@ -155,9 +173,9 @@ def process_one_file(shoebox_path, chunk_idx, global_offset, out_chunks_dir, cou
         fg_list.append(fg.ravel())
         bg_list.append(bg.ravel())
         ov_list.append(ov.ravel())
-        shapes[i] = d.shape  # (D, H, W)
-        bboxes[i] = list(sb.bbox)
-        total_voxels += d.size
+        shapes[i] = (D, H, W)
+        bboxes[i] = [x0, x1, y0, y1, z0, z1]
+        total_voxels += V
 
     # Concatenate to flat arrays + cumulative offsets
     offsets = np.empty(n + 1, dtype=np.int64)

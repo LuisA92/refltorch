@@ -28,9 +28,11 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
+
 def _tqdm(iterable, **kwargs):
     try:
         from tqdm import tqdm
+
         return tqdm(iterable, **kwargs)
     except ImportError:
         return iterable
@@ -97,7 +99,7 @@ def compute_overlap_mask(bboxes, centroids, D, H, W):
             if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
                 continue
 
-            # Ownership: neighbor wins pixels closer to its centroid
+            # neighbor wins pixels closer to its centroid
             zs = np.arange(iz0, iz1)
             ys = np.arange(iy0, iy1)
             xs = np.arange(ix0, ix1)
@@ -122,9 +124,15 @@ def parse_args():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--refl", required=True, help="Path to reflections_.refl (has bbox + xyzcal.px)")
-    ap.add_argument("--masks", required=True, help="Path to existing masks.npy or masks.pt")
-    ap.add_argument("--out", default=None, help="Output path (default: <masks>_overlap.<ext>)")
+    ap.add_argument(
+        "--refl", required=True, help="Path to reflections_.refl (has bbox + xyzcal.px)"
+    )
+    ap.add_argument(
+        "--masks", required=True, help="Path to existing masks.npy or masks.pt"
+    )
+    ap.add_argument(
+        "--out", default=None, help="Output path (default: <masks>_overlap.<ext>)"
+    )
     ap.add_argument("--h", type=int, required=True, help="Shoebox height")
     ap.add_argument("--w", type=int, required=True, help="Shoebox width")
     ap.add_argument("--d", type=int, required=True, help="Shoebox depth (frames)")
