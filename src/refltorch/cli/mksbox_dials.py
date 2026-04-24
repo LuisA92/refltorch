@@ -89,7 +89,91 @@ def parse_args():
         choices=["uint16", "int32"],
         help="Storage dtype for pixel counts",
     )
+    ap.add_argument(
+        "--n-bins",
+        type=int,
+        default=10,
+        help="Number of resolution bins for group_labels (used by hierarchical priors).",
+    )
+    ap.add_argument(
+        "--min-per-bin",
+        type=int,
+        default=50,
+        help="Minimum reflections per bin; n-bins is auto-reduced if below.",
+    )
     return ap.parse_args()
+
+
+def _bin_by_resolution(d, n_bins: int, min_per_bin: int = 50):
+    """Quantile-bin reflections by resolution (mirrors prepare_priors._bin_by_resolution).
+
+    Returns (group_labels, bin_edges, n_bins_actual).
+    """
+    import torch
+
+    d = d.float()
+    while n_bins > 1:
+        quantiles = torch.linspace(0, 1, n_bins + 1)
+        bin_edges = torch.quantile(d, quantiles)
+        group_labels = torch.searchsorted(bin_edges[1:-1], d).long()
+        counts_per_bin = torch.bincount(group_labels, minlength=n_bins)
+        if counts_per_bin.min() >= min_per_bin:
+            return group_labels, bin_edges, n_bins
+        old_n = n_bins
+        n_bins = max(1, n_bins - 1)
+        print(f"  [bin] shrinking n_bins {old_n} -> {n_bins} (min bin < {min_per_bin})")
+    group_labels = torch.zeros(len(d), dtype=torch.long)
+    bin_edges = torch.tensor([d.min().item(), d.max().item()])
+    return group_labels, bin_edges, 1
+
+
+def _streaming_stats_from_chunks(chunk_paths):
+    """Compute mean/var of raw counts and Anscombe counts across all chunks,
+    taking only mask-valid voxels. Returns a dict with 'raw' and 'anscombe'
+    each mapping to (mean, var) float tensors."""
+    import torch
+
+    sum_c = 0.0
+    sumsq_c = 0.0
+    sum_a = 0.0
+    sumsq_a = 0.0
+    n_valid = 0
+
+    for p in chunk_paths:
+        with np.load(p) as npz:
+            data = npz["data"].astype(np.float64)      # may be uint16
+            mask = npz["mask"]                         # bool
+        if mask.dtype != np.bool_:
+            mask = mask.astype(bool)
+        v = data[mask]                                 # (n_valid_chunk,)
+        if v.size == 0:
+            continue
+        a = 2.0 * np.sqrt(v + 0.375)
+        sum_c += float(v.sum())
+        sumsq_c += float((v * v).sum())
+        sum_a += float(a.sum())
+        sumsq_a += float((a * a).sum())
+        n_valid += int(v.size)
+
+    if n_valid == 0:
+        raise RuntimeError("No valid voxels found across chunks; cannot compute stats.")
+
+    mean_c = sum_c / n_valid
+    var_c = sumsq_c / n_valid - mean_c * mean_c
+    mean_a = sum_a / n_valid
+    var_a = sumsq_a / n_valid - mean_a * mean_a
+
+    return {
+        "raw": (
+            torch.tensor(mean_c, dtype=torch.float32),
+            torch.tensor(var_c, dtype=torch.float32),
+        ),
+        "anscombe": (
+            torch.tensor(mean_a, dtype=torch.float32),
+            torch.tensor(var_a, dtype=torch.float32),
+        ),
+        "n_valid": n_valid,
+    }
 
 
 def process_one_file(shoebox_path, chunk_idx, global_offset, out_chunks_dir, counts_dtype):
@@ -268,8 +352,52 @@ def main():
         },
     }
     (out_dir / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
-
     print(f"Wrote {out_dir / 'manifest.yaml'}")
+
+    # ------------------------------------------------------------
+    # metadata.pt — per-reflection scalars (d, miller_index, flags, etc.)
+    # ------------------------------------------------------------
+    from refltorch.refl_utils import refl_as_pt
+    print("\nWriting metadata.pt from consolidated reflection file...")
+    metadata = refl_as_pt(refl=str(refl_out), out_dir=out_dir)
+    print(f"  metadata keys: {sorted(metadata.keys())}")
+    if "d" not in metadata:
+        print("  WARNING: metadata has no 'd' column — WilsonLoss will fail.")
+    else:
+        d = metadata["d"]
+        print(f"  d: shape={tuple(d.shape)}, min={float(d.min()):.3f}, max={float(d.max()):.3f}")
+
+    # ------------------------------------------------------------
+    # stats.pt + anscombe_stats.pt — for encoder-input standardization
+    # ------------------------------------------------------------
+    import torch as _torch
+    print("\nComputing dataset stats (streaming over chunks)...")
+    chunk_paths = sorted(chunks_dir.glob("chunk_*.npz"))
+    stats = _streaming_stats_from_chunks(chunk_paths)
+    raw_mean, raw_var = stats["raw"]
+    ans_mean, ans_var = stats["anscombe"]
+    _torch.save(_torch.tensor([raw_mean, raw_var], dtype=_torch.float32), out_dir / "stats.pt")
+    _torch.save(_torch.tensor([ans_mean, ans_var], dtype=_torch.float32), out_dir / "anscombe_stats.pt")
+    print(f"  raw  mean={raw_mean:.3f}, var={raw_var:.3f}  (over {stats['n_valid']:,} valid voxels)")
+    print(f"  ans  mean={ans_mean:.3f}, var={ans_var:.3f}")
+
+    # ------------------------------------------------------------
+    # group_labels — resolution bins used by hierarchical priors
+    # ------------------------------------------------------------
+    if "d" in metadata and args.n_bins > 0:
+        print(f"\nBinning by resolution into {args.n_bins} group(s)...")
+        group_labels, bin_edges, n_bins_actual = _bin_by_resolution(
+            metadata["d"], args.n_bins, args.min_per_bin
+        )
+        gl_name = f"group_labels_{n_bins_actual}.pt"
+        edges_name = f"bin_edges_{n_bins_actual}.pt"
+        _torch.save(group_labels, out_dir / gl_name)
+        _torch.save(bin_edges, out_dir / edges_name)
+        print(f"  wrote {gl_name} (final n_bins={n_bins_actual})")
+        print(f"  wrote {edges_name}")
+        counts_per_bin = _torch.bincount(group_labels, minlength=n_bins_actual).tolist()
+        print(f"  refl per bin: {counts_per_bin}")
+
     print("\nDone.")
 
 
