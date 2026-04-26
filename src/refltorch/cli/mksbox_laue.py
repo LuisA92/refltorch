@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=8,
+        default=16,
         help="max parallel workers (capped by os.cpu_count())",
     )
     parser.add_argument(
@@ -167,22 +167,43 @@ def _process_image_chunk(
     dz,
     dy,
     dx,
+    counts_path,
+    masks_path,
+    counts_dtype_str,
 ):
     """Worker.
+
+    Opens the pre-allocated `counts.npy` / `masks.npy` memmaps in r+ mode and
+    writes its slice of refls directly. Each refl_id is owned by exactly one
+    worker (refls are grouped by experiment, experiments by chunk), so the
+    worker writes are at disjoint rows — POSIX page cache handles concurrent
+    disjoint writes safely without locking.
 
     image_records: list of dicts, one per image to process. Each dict has:
         - "expt_idx": int, position into the .expt's experiment list
         - "panels":   (n,) int array
         - "bboxes":   (n, 6) int array, z range = (0, 1)
         - "refl_ids": (n,) int array
+
+    Returns a small summary dict; no large arrays travel back to main.
     """
     import numpy as np  # noqa: F811  (re-import for fork safety)
     from dials.array_family import flex
     from dxtbx.model.experiment_list import ExperimentListFactory
 
     experiments = ExperimentListFactory.from_json_file(expt_path, check_format=True)
+    counts_dtype = np.dtype(counts_dtype_str)
+    dtype_max = (
+        np.iinfo(counts_dtype).max
+        if np.issubdtype(counts_dtype, np.integer)
+        else None
+    )
 
-    results = []
+    counts_mm = np.load(counts_path, mmap_mode="r+")
+    masks_mm = np.load(masks_path, mmap_mode="r+")
+
+    n_done = 0
+    n_clipped = 0
     for rec in image_records:
         expt_idx = rec["expt_idx"]
         panels = rec["panels"]
@@ -190,7 +211,6 @@ def _process_image_chunk(
         refl_ids = rec["refl_ids"]
         n = len(refl_ids)
 
-        # Build a minimal reflection table so DIALS can do the actual extraction.
         subset = flex.reflection_table()
         subset["panel"] = flex.size_t(panels.astype(np.int64))
         bbox_col = flex.int6(n)
@@ -214,20 +234,26 @@ def _process_image_chunk(
         counts = np.zeros((n, dz, dy, dx), dtype=np.int32)
         masks = np.zeros((n, dz, dy, dx), dtype=bool)
         for i, sb in enumerate(subset["shoebox"]):
-            data = sb.data.as_numpy_array()         # (dz, dy, dx)
-            mraw = sb.mask.as_numpy_array()         # bitfield; bit 1 = Valid
-            counts[i] = data
-            masks[i] = (mraw & 1).astype(bool)
+            counts[i] = sb.data.as_numpy_array()
+            masks[i] = (sb.mask.as_numpy_array() & 1).astype(bool)
 
-        results.append(
-            {
-                "refl_ids": refl_ids,
-                "counts": counts.reshape(n, -1),
-                "masks": masks.reshape(n, -1),
-            }
-        )
+        counts_flat = counts.reshape(n, -1)
+        masks_flat = masks.reshape(n, -1)
 
-    return results
+        if dtype_max is not None:
+            over = counts_flat > dtype_max
+            if over.any():
+                n_clipped += int(over.sum())
+                counts_flat = np.clip(counts_flat, 0, dtype_max)
+
+        # Direct write to disk-backed memmap; no pickling back to main.
+        counts_mm[refl_ids] = counts_flat.astype(counts_dtype, copy=False)
+        masks_mm[refl_ids] = masks_flat
+        n_done += n
+
+    counts_mm.flush()
+    masks_mm.flush()
+    return {"n_done": n_done, "n_clipped": n_clipped}
 
 
 def _save_stats_from_memmap(
@@ -446,7 +472,9 @@ def main():
     max_workers = min(args.max_workers, os.cpu_count() or 1)
     print(f"running {len(chunks)} chunks across {max_workers} workers")
 
-    # pre-allocate output memmaps
+    # Pre-allocate output memmaps and close them — workers reopen in r+ mode
+    # and write their disjoint slices directly. This avoids returning ~110 MB
+    # arrays per chunk through the IPC pipe to main.
     N = len(refl_ids_np)
     counts_path = out_dir / args.counts_fname
     masks_path = out_dir / args.masks_fname
@@ -458,13 +486,12 @@ def main():
     masks_mm = open_memmap(
         masks_path, mode="w+", dtype=np.bool_, shape=(N, dz * dy * dx),
     )
-
-    dtype_max = (
-        np.iinfo(counts_dtype).max if np.issubdtype(counts_dtype, np.integer) else None
-    )
-    clip_warned = False
+    counts_mm.flush()
+    masks_mm.flush()
+    del counts_mm, masks_mm  # close so workers can reopen r+
 
     n_done = 0
+    n_clipped_total = 0
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
@@ -472,33 +499,23 @@ def main():
                 chunk,
                 str(expt_path_in),
                 dz, dy, dx,
+                str(counts_path),
+                str(masks_path),
+                args.counts_dtype,
             )
             for chunk in chunks
         ]
         for f in as_completed(futures):
-            for res in f.result():
-                ids = res["refl_ids"]
-                sbox = res["counts"]
+            res = f.result()
+            n_done += res["n_done"]
+            n_clipped_total += res["n_clipped"]
 
-                if dtype_max is not None:
-                    over = sbox > dtype_max
-                    if over.any():
-                        if not clip_warned:
-                            print(
-                                f"WARNING: {int(over.sum())} pixel(s) exceed "
-                                f"{counts_dtype} max ({dtype_max}); clipping. "
-                                "Consider --counts-dtype int32 if overloads matter."
-                            )
-                            clip_warned = True
-                        sbox = np.clip(sbox, 0, dtype_max)
-
-                counts_mm[ids] = sbox.astype(counts_dtype, copy=False)
-                masks_mm[ids] = res["masks"]
-                n_done += len(ids)
-
-    counts_mm.flush()
-    masks_mm.flush()
-    del counts_mm, masks_mm
+    if n_clipped_total > 0:
+        print(
+            f"WARNING: {n_clipped_total} pixel(s) exceeded {counts_dtype} max "
+            f"({np.iinfo(counts_dtype).max}); clipped. Consider --counts-dtype "
+            "int32 if overloads matter."
+        )
     print(f"extracted {n_done} shoeboxes -> {counts_path}, {masks_path}")
 
     # --- metadata.pt via refl_as_pt --------------------------------
