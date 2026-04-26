@@ -100,6 +100,15 @@ def parse_args():
         choices=["uint16", "int32", "float32"],
     )
     parser.add_argument(
+        "--shoebox-format",
+        type=str,
+        default="npy",
+        choices=["npy", "pt"],
+        help="storage format for counts and masks. npy uses streaming memmap "
+        "writes (low RAM, recommended for large datasets); pt converts each "
+        "memmap to a .pt tensor at the end (full RAM materialization).",
+    )
+    parser.add_argument(
         "--save-as-pt",
         action="store_true",
         help="also write stats.pt, anscombe_stats.pt, concentration.pt",
@@ -270,6 +279,20 @@ def _save_concentration_from_memmap(
     torch.save(torch.from_numpy(conc), out_dir / out_fname)
 
 
+def _convert_npy_memmap_to_pt(npy_path: Path) -> Path:
+    """Materialize a .npy file into a .pt tensor and remove the .npy.
+
+    Reads the file fully into RAM in one shot (torch.save does not stream).
+    Returns the new .pt path.
+    """
+    arr = np.load(npy_path)
+    pt_path = npy_path.with_suffix(".pt")
+    torch.save(torch.from_numpy(arr), pt_path)
+    del arr
+    npy_path.unlink()
+    return pt_path
+
+
 def main():
     import yaml
     from dials.array_family import flex
@@ -362,14 +385,35 @@ def main():
     # --- refl_ids ------------------------------------------------------------
     reflections["refl_ids"] = flex.int(np.arange(len(reflections), dtype=np.int32))
 
-    # --- save the reflection table (with wavelength + bbox + refl_ids) ------
+    # --- d-spacing per refl via per-experiment unit cell ---------------------
+    reflections.compute_d(experiments)
+    d_arr = np.array(reflections["d"])
+    print(f"  d range: {d_arr.min():.3f} - {d_arr.max():.3f} Å")
+
+    # --- save the reflection table (now also carries d) ----------------------
     refl_path_out = out_dir / args.refl_fname
     reflections.as_file(str(refl_path_out))
-    print(f"wrote refl with bbox/wavelength/refl_ids -> {refl_path_out}")
+    print(f"wrote refl with bbox/wavelength/refl_ids/d -> {refl_path_out}")
 
     # write identifiers for traceability
     identifier = dict(reflections.experiment_identifiers())
     (out_dir / "identifiers.yaml").write_text(yaml.safe_dump(identifier))
+
+    # --- crystal metadata: cell + spacegroup --------------------------------
+    # All per-image experiments are copies of the same refined crystal model,
+    # so the first one is representative.
+    crystal0 = experiments[0].crystal
+    cell_params = crystal0.get_unit_cell().parameters()
+    sg_info = crystal0.get_space_group().info()
+    crystal_meta = {
+        "cell": [float(x) for x in cell_params],
+        "space_group": sg_info.symbol_and_number(),
+        "space_group_number": int(sg_info.type().number()),
+    }
+    (out_dir / "crystal.yaml").write_text(yaml.safe_dump(crystal_meta))
+    print(f"wrote crystal metadata -> {out_dir / 'crystal.yaml'}: "
+          f"cell={tuple(round(c, 3) for c in crystal_meta['cell'])}, "
+          f"sg={crystal_meta['space_group']}")
 
     # --- group refls by expt_idx for parallel extraction ---------------------
     panels_np = np.array(reflections["panel"])
@@ -474,6 +518,16 @@ def main():
             chunk=args.stats_chunk,
         )
         print("wrote stats.pt, anscombe_stats.pt, concentration.pt")
+
+    if args.shoebox_format == "pt":
+        nbytes = counts_path.stat().st_size + masks_path.stat().st_size
+        print(
+            f"converting counts/masks .npy -> .pt "
+            f"(loads {nbytes / 1e9:.1f} GB into RAM)"
+        )
+        new_counts = _convert_npy_memmap_to_pt(counts_path)
+        new_masks = _convert_npy_memmap_to_pt(masks_path)
+        print(f"  -> {new_counts}, {new_masks}")
 
 
 if __name__ == "__main__":
