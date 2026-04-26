@@ -501,8 +501,17 @@ def main():
     del counts_mm, masks_mm
     print(f"extracted {n_done} shoeboxes -> {counts_path}, {masks_path}")
 
-    # --- metadata.pt via refl_as_pt (picks up wavelength via SCALAR_DTYPES) --
-    refl_as_pt(refl=str(refl_path_out), out_dir=out_dir)
+    # --- metadata.pt via refl_as_pt --------------------------------
+    # Pass column_names explicitly so wavelength (and any laue-specific extras)
+    # are picked up regardless of whether the installed refltorch's
+    # SCALAR_DTYPES has been updated. Belt and suspenders against stale
+    # installs on shared clusters.
+    from refltorch.refl_utils.refl_utils import DEFAULT_REFL_COLS
+    cols = list(DEFAULT_REFL_COLS)
+    for must_have in ("wavelength", "d"):
+        if must_have not in cols:
+            cols.append(must_have)
+    refl_as_pt(refl=str(refl_path_out), column_names=cols, out_dir=out_dir)
     print(f"wrote metadata.pt under {out_dir}")
 
     if args.save_as_pt:
