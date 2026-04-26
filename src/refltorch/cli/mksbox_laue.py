@@ -1,10 +1,12 @@
 """Extract shoeboxes from laue-dials integrated.refl + integrated.expt.
 
 Differences from refltorch.mksbox (regular DIALS):
-- Each experiment is a single-frame still (no rotation scan).
-- refl["id"] is degenerate (all zero); image_num is recovered from the
-  trailing integer in the imageset filename (per laue-dials convention).
-- Wavelength is recovered as 1/|s1| per reflection.
+- Each experiment is a single-frame still (no rotation scan); xyzcal.px.z
+  is ~0 for all refls, so routing goes through refl["id"] (the per-image
+  experiment index) instead.
+- image_num is recovered from the trailing integer in the imageset
+  filename (per laue-dials convention) and looked up via id.
+- Wavelength is read from refl["wavelength"] (laue-dials writes it).
 - Bbox edge handling shifts to preserve full size (vs clip+zero-pad).
 - --max-images selects the first N original image numbers (skips images
   that were dropped by laue-dials integration).
@@ -303,54 +305,49 @@ def main():
     )
     print(f"  {len(experiments)} experiments")
 
-    # --- image_num <-> expt_idx map (laue-dials filename convention) ----------
-    img_to_expt: dict[int, int] = {}
+    # --- expt_idx -> image_num map (laue-dials filename convention) ---------
+    expt_to_img = np.empty(len(experiments), dtype=np.int64)
     for i in range(len(experiments)):
-        path = experiments[i].imageset.get_path(0)
-        img_num = _path_to_image_num(path)
-        if img_num in img_to_expt:
-            raise ValueError(
-                f"duplicate image_num {img_num} from path {path}; "
-                f"earlier expt_idx={img_to_expt[img_num]}, this one={i}"
-            )
-        img_to_expt[img_num] = i
+        expt_to_img[i] = _path_to_image_num(experiments[i].imageset.get_path(0))
+    if len(np.unique(expt_to_img)) != len(expt_to_img):
+        raise ValueError("duplicate image_num across experiments; check filenames")
     print(
-        f"  image_num range: {min(img_to_expt)}-{max(img_to_expt)} "
-        f"({len(img_to_expt)} images)"
+        f"  image_num range: {expt_to_img.min()}-{expt_to_img.max()} "
+        f"({len(expt_to_img)} images)"
     )
 
     # --- detector size (single-panel, taken from experiment 0) ----------------
     det0 = experiments[0].detector[0]
     dx_det, dy_det = det0.get_image_size()
 
-    # --- per-refl image number from xyzcal.px.z ------------------------------
-    xyzcal = reflections["xyzcal.px"]
-    x_px = xyzcal.parts()[0]
-    y_px = xyzcal.parts()[1]
-    z_px = xyzcal.parts()[2]
-    image_num = flex.floor(z_px).iround()
+    # --- per-refl image_num via id (stills convention) -----------------------
+    expt_idx_per_refl = np.array(reflections["id"]).astype(np.int64)
+    if expt_idx_per_refl.min() < 0 or expt_idx_per_refl.max() >= len(experiments):
+        raise ValueError(
+            f"refl['id'] out of bounds: range=[{expt_idx_per_refl.min()}, "
+            f"{expt_idx_per_refl.max()}], len(experiments)={len(experiments)}"
+        )
+    image_num_per_refl = expt_to_img[expt_idx_per_refl]
 
-    # filter: drop refls on missing images, and apply --max-images
-    keep_mask = flex.bool(len(reflections), False)
-    for j in range(len(reflections)):
-        n_img = image_num[j]
-        if n_img < 0 or n_img >= args.max_images:
-            continue
-        if n_img not in img_to_expt:
-            continue
-        keep_mask[j] = True
-    n_kept = keep_mask.count(True)
+    # filter: --max-images on derived image_num
+    keep_np = image_num_per_refl < args.max_images
+    keep_mask = flex.bool(keep_np.tolist())
+    n_kept = int(keep_np.sum())
     print(
         f"keeping {n_kept} / {len(reflections)} refls "
-        f"(image_num < {args.max_images} AND in expt list)"
+        f"(image_num < {args.max_images})"
     )
     reflections = reflections.select(keep_mask)
-    image_num = image_num.select(keep_mask)
+    expt_idx_per_refl = expt_idx_per_refl[keep_np]
+    image_num_per_refl = image_num_per_refl[keep_np]
 
-    # --- wavelength = 1/|s1| -------------------------------------------------
-    s1_np = np.array(reflections["s1"])  # (N, 3), units 1/Å
-    wavelength_np = 1.0 / np.linalg.norm(s1_np, axis=1)
-    reflections["wavelength"] = flex.double(wavelength_np.astype(np.float64))
+    # --- wavelength: read from refl table (laue-dials writes it) -------------
+    if "wavelength" not in reflections:
+        raise ValueError(
+            "refl table has no 'wavelength' column; this CLI expects laue-dials "
+            "integrated output. (Older un-integrated tables can use 1/|s1| "
+            "instead — open a ticket if you need that path.)"
+        )
 
     # --- bbox column with shift logic; z fixed to (0, 1) per single-frame ----
     x_int = flex.floor(reflections["xyzcal.px"].parts()[0]).iround()
@@ -374,8 +371,7 @@ def main():
     identifier = dict(reflections.experiment_identifiers())
     (out_dir / "identifiers.yaml").write_text(yaml.safe_dump(identifier))
 
-    # --- group refls by image_num for parallel extraction --------------------
-    image_num_np = np.array(image_num)
+    # --- group refls by expt_idx for parallel extraction ---------------------
     panels_np = np.array(reflections["panel"])
     bboxes_np = np.stack(
         [b.as_numpy_array() for b in reflections["bbox"].parts()],
@@ -384,11 +380,11 @@ def main():
     refl_ids_np = np.array(reflections["refl_ids"])
 
     image_records: list[dict] = []
-    for img_num in np.unique(image_num_np):
-        sel = image_num_np == img_num
+    for ei in np.unique(expt_idx_per_refl):
+        sel = expt_idx_per_refl == ei
         image_records.append(
             {
-                "expt_idx": img_to_expt[int(img_num)],
+                "expt_idx": int(ei),
                 "panels": panels_np[sel],
                 "bboxes": bboxes_np[sel],
                 "refl_ids": refl_ids_np[sel],

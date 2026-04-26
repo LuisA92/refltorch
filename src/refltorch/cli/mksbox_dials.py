@@ -128,50 +128,50 @@ def _bin_by_resolution(d, n_bins: int, min_per_bin: int = 50):
 
 
 def _streaming_stats_from_chunks(chunk_paths):
-    """Compute mean/var of raw counts and Anscombe counts across all chunks,
-    taking only mask-valid voxels. Returns a dict with 'raw' and 'anscombe'
-    each mapping to (mean, var) float tensors."""
+    """Compute mean/var of raw counts, Anscombe counts, AND log1p counts
+    across all chunks, restricted to mask-valid voxels. Returns a dict
+    with 'raw', 'anscombe', and 'log1p' each mapping to (mean, var)
+    float tensors plus an 'n_valid' count."""
     import torch
 
-    sum_c = 0.0
-    sumsq_c = 0.0
-    sum_a = 0.0
-    sumsq_a = 0.0
+    sum_c = sumsq_c = 0.0
+    sum_a = sumsq_a = 0.0
+    sum_l = sumsq_l = 0.0
     n_valid = 0
 
     for p in chunk_paths:
         with np.load(p) as npz:
-            data = npz["data"].astype(np.float64)      # may be uint16
-            mask = npz["mask"]                         # bool
+            data = npz["data"].astype(np.float64)      # may be uint16 / int32
+            mask = npz["mask"]                          # bool
         if mask.dtype != np.bool_:
             mask = mask.astype(bool)
-        v = data[mask]                                 # (n_valid_chunk,)
+        v = data[mask]                                  # (n_valid_chunk,)
         if v.size == 0:
             continue
+        # Clip pre-transform to non-negative (raw can have -1 sentinels for
+        # out-of-trusted-range pixels; the mask already excludes them).
+        np.clip(v, 0, None, out=v)
         a = 2.0 * np.sqrt(v + 0.375)
+        l = np.log1p(v)
         sum_c += float(v.sum())
         sumsq_c += float((v * v).sum())
         sum_a += float(a.sum())
         sumsq_a += float((a * a).sum())
+        sum_l += float(l.sum())
+        sumsq_l += float((l * l).sum())
         n_valid += int(v.size)
 
     if n_valid == 0:
         raise RuntimeError("No valid voxels found across chunks; cannot compute stats.")
 
-    mean_c = sum_c / n_valid
-    var_c = sumsq_c / n_valid - mean_c * mean_c
-    mean_a = sum_a / n_valid
-    var_a = sumsq_a / n_valid - mean_a * mean_a
+    def _mv(s, ss):
+        m = s / n_valid
+        return m, max(ss / n_valid - m * m, 0.0)
 
     return {
-        "raw": (
-            torch.tensor(mean_c, dtype=torch.float32),
-            torch.tensor(var_c, dtype=torch.float32),
-        ),
-        "anscombe": (
-            torch.tensor(mean_a, dtype=torch.float32),
-            torch.tensor(var_a, dtype=torch.float32),
-        ),
+        "raw": tuple(torch.tensor(x, dtype=torch.float32) for x in _mv(sum_c, sumsq_c)),
+        "anscombe": tuple(torch.tensor(x, dtype=torch.float32) for x in _mv(sum_a, sumsq_a)),
+        "log1p": tuple(torch.tensor(x, dtype=torch.float32) for x in _mv(sum_l, sumsq_l)),
         "n_valid": n_valid,
     }
 
@@ -376,10 +376,13 @@ def main():
     stats = _streaming_stats_from_chunks(chunk_paths)
     raw_mean, raw_var = stats["raw"]
     ans_mean, ans_var = stats["anscombe"]
+    log_mean, log_var = stats["log1p"]
     _torch.save(_torch.tensor([raw_mean, raw_var], dtype=_torch.float32), out_dir / "stats.pt")
     _torch.save(_torch.tensor([ans_mean, ans_var], dtype=_torch.float32), out_dir / "anscombe_stats.pt")
-    print(f"  raw  mean={raw_mean:.3f}, var={raw_var:.3f}  (over {stats['n_valid']:,} valid voxels)")
-    print(f"  ans  mean={ans_mean:.3f}, var={ans_var:.3f}")
+    _torch.save(_torch.tensor([log_mean, log_var], dtype=_torch.float32), out_dir / "log1p_stats.pt")
+    print(f"  raw    mean={raw_mean:.3f}, var={raw_var:.3f}  (over {stats['n_valid']:,} valid voxels)")
+    print(f"  ans    mean={ans_mean:.3f}, var={ans_var:.3f}")
+    print(f"  log1p  mean={log_mean:.3f}, var={log_var:.3f}")
 
     # ------------------------------------------------------------
     # group_labels — resolution bins used by hierarchical priors
