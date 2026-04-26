@@ -27,6 +27,7 @@ dependencies = [
 "refltorch.mksbox" = "refltorch.cli.mksbox:main"
 "refltorch.add-overlap" = "refltorch.cli.add_overlap:main"
 "refltorch.mksbox-dials" = "refltorch.cli.mksbox_dials:main"
+"refltorch.mksbox-laue" = "refltorch.cli.mksbox_laue:main"
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
