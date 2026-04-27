@@ -408,8 +408,9 @@ def main():
         bbox[j] = (x0, x1, y0, y1, 0, 1)
     reflections["bbox"] = bbox
 
-    # --- refl_ids ------------------------------------------------------------
+    # --- refl_ids + image_num -------------------------------------------------
     reflections["refl_ids"] = flex.int(np.arange(len(reflections), dtype=np.int32))
+    reflections["image_num"] = flex.int(image_num_per_refl.astype(np.int32))
 
     # --- d-spacing per refl via per-experiment unit cell ---------------------
     reflections.compute_d(experiments)
@@ -525,7 +526,7 @@ def main():
     # installs on shared clusters.
     from refltorch.refl_utils.refl_utils import DEFAULT_REFL_COLS
     cols = list(DEFAULT_REFL_COLS)
-    for must_have in ("wavelength", "d"):
+    for must_have in ("wavelength", "d", "image_num"):
         if must_have not in cols:
             cols.append(must_have)
     refl_as_pt(refl=str(refl_path_out), column_names=cols, out_dir=out_dir)
