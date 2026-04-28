@@ -114,6 +114,12 @@ def parse_args():
         help="also write stats.pt, anscombe_stats.pt, concentration.pt",
     )
     parser.add_argument("--stats-chunk", type=int, default=10_000)
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.1,
+        help="fraction of reflections to flag as is_test (random per-image)",
+    )
     return parser.parse_args()
 
 
@@ -408,9 +414,14 @@ def main():
         bbox[j] = (x0, x1, y0, y1, 0, 1)
     reflections["bbox"] = bbox
 
-    # --- refl_ids + image_num -------------------------------------------------
-    reflections["refl_ids"] = flex.int(np.arange(len(reflections), dtype=np.int32))
+    # --- refl_ids + image_num + is_test ----------------------------------------
+    n_refl = len(reflections)
+    reflections["refl_ids"] = flex.int(np.arange(n_refl, dtype=np.int32))
     reflections["image_num"] = flex.int(image_num_per_refl.astype(np.int32))
+    rng = np.random.default_rng(42)
+    is_test = rng.random(n_refl) < args.test_fraction
+    reflections["is_test"] = flex.bool(is_test.tolist())
+    print(f"  is_test: {is_test.sum()} / {n_refl} ({100 * is_test.mean():.1f}%)")
 
     # --- d-spacing per refl via per-experiment unit cell ---------------------
     reflections.compute_d(experiments)
@@ -526,7 +537,7 @@ def main():
     # installs on shared clusters.
     from refltorch.refl_utils.refl_utils import DEFAULT_REFL_COLS
     cols = list(DEFAULT_REFL_COLS)
-    for must_have in ("wavelength", "d", "image_num"):
+    for must_have in ("wavelength", "d", "image_num", "is_test"):
         if must_have not in cols:
             cols.append(must_have)
     refl_as_pt(refl=str(refl_path_out), column_names=cols, out_dir=out_dir)

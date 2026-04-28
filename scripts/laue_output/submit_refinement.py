@@ -46,6 +46,12 @@ def parse_args():
     parser.add_argument("--pdb", type=Path, default=REFERENCE_PDB)
     parser.add_argument("--eff1", type=Path, default=REFINEMENT_EFF_1)
     parser.add_argument("--eff2", type=Path, default=REFINEMENT_EFF_2)
+    parser.add_argument(
+        "--dependency",
+        type=str,
+        default=None,
+        help="SLURM job ID(s) to depend on (afterany:ID[:ID...])",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -107,6 +113,7 @@ def submit_refinement(
     pdb: Path,
     eff1: Path,
     eff2: Path,
+    dependency: str | None = None,
     dry_run: bool = False,
 ) -> str | None:
     refine_dir.mkdir(parents=True, exist_ok=True)
@@ -149,8 +156,10 @@ def submit_refinement(
         "--mem=32G",
         "--partition=shared,seas_compute",
         "--cpus-per-task=4",
-        str(script_path),
     ]
+    if dependency:
+        cmd.append(f"--dependency=afterany:{dependency}")
+    cmd.append(str(script_path))
 
     if dry_run:
         print(f"    [dry-run] {' '.join(cmd)}")
@@ -190,13 +199,16 @@ def main():
             print(f"  {epoch_dir.name} config{cfg}: {mtz.name}")
 
             job_id = submit_refinement(
-                mtz, refine_dir, args.pdb, args.eff1, args.eff2, args.dry_run,
+                mtz, refine_dir, args.pdb, args.eff1, args.eff2,
+                dependency=args.dependency, dry_run=args.dry_run,
             )
             if job_id:
                 print(f"    → job {job_id}")
                 job_ids.append(job_id)
 
     print(f"\nsubmitted {len(job_ids)} refinement jobs")
+    if job_ids:
+        print(f"REFINEMENT_JOB_IDS={':'.join(job_ids)}")
 
 
 if __name__ == "__main__":

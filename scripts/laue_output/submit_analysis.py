@@ -44,6 +44,12 @@ def parse_args():
         default=str(Path(__file__).parent / "anomalous_peak_heights.py"),
         help="path to anomalous_peak_heights.py",
     )
+    parser.add_argument(
+        "--dependency",
+        type=str,
+        default=None,
+        help="SLURM job ID(s) to depend on (afterany:ID[:ID...])",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -183,8 +189,10 @@ def main():
                 "--mem=16G",
                 "--partition=shared,seas_compute",
                 "--cpus-per-task=1",
-                str(script_path),
             ]
+            if args.dependency:
+                cmd.append(f"--dependency=afterany:{args.dependency}")
+            cmd.append(str(script_path))
 
             print(f"  {epoch_dir.name} config{cfg}")
             if args.dry_run:

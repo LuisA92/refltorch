@@ -103,20 +103,44 @@ integrator.pred -v \
 # 3. Submit Careless scaling (separate SLURM jobs — crls env)
 # =====================================================================
 echo "===== Submitting Careless scaling (configs: $SCALE_CONFIGS) ====="
-python "$SCRIPTS/submit_scaling.py" \
+scaling_output=$(python "$SCRIPTS/submit_scaling.py" \
     --run-dir "$run_dir" \
-    --configs $SCALE_CONFIGS
+    --configs $SCALE_CONFIGS)
+echo "$scaling_output"
+
+# Extract colon-separated job IDs for dependency chaining
+SCALING_IDS=$(echo "$scaling_output" | grep '^SCALING_JOB_IDS=' | cut -d= -f2)
+if [[ -z "$SCALING_IDS" ]]; then
+    echo "WARNING: No scaling job IDs captured; refinement/analysis will not be submitted."
+    exit 0
+fi
 
 # =====================================================================
-# 4. Submit refinement + analysis (user runs after scaling completes)
+# 4. Submit refinement (depends on all scaling jobs)
 # =====================================================================
+echo "===== Submitting refinement (depends on scaling: $SCALING_IDS) ====="
+refinement_output=$(python "$SCRIPTS/submit_refinement.py" \
+    --run-dir "$run_dir" \
+    --configs $SCALE_CONFIGS \
+    --dependency "$SCALING_IDS")
+echo "$refinement_output"
+
+REFINEMENT_IDS=$(echo "$refinement_output" | grep '^REFINEMENT_JOB_IDS=' | cut -d= -f2)
+if [[ -z "$REFINEMENT_IDS" ]]; then
+    echo "WARNING: No refinement job IDs captured; analysis will not be submitted."
+    exit 0
+fi
+
+# =====================================================================
+# 5. Submit analysis (depends on all refinement jobs)
+# =====================================================================
+echo "===== Submitting analysis (depends on refinement: $REFINEMENT_IDS) ====="
+python "$SCRIPTS/submit_analysis.py" \
+    --run-dir "$run_dir" \
+    --configs $SCALE_CONFIGS \
+    --dependency "$REFINEMENT_IDS"
+
 echo ""
-echo "===== Pipeline complete up to scaling submission ====="
-echo ""
-echo "After scaling jobs finish, run:"
-echo "  python $SCRIPTS/submit_refinement.py --run-dir $run_dir --configs $SCALE_CONFIGS"
-echo ""
-echo "After refinement jobs finish, run:"
-echo "  python $SCRIPTS/submit_analysis.py --run-dir $run_dir --configs $SCALE_CONFIGS"
-echo ""
-echo "===== Done ====="
+echo "===== Full pipeline submitted ====="
+echo "  scaling    → refinement → analysis (SLURM dependency chain)"
+echo "  monitor: squeue -u \$USER"

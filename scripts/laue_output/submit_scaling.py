@@ -56,6 +56,12 @@ def parse_args():
         help="Resolution cutoff for Careless (default: 1.5)",
     )
     parser.add_argument(
+        "--dependency",
+        type=str,
+        default=None,
+        help="SLURM job ID(s) to depend on (afterany:ID[:ID...])",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be submitted without submitting",
@@ -88,11 +94,16 @@ def submit_scaling_job(
     config: int,
     scale_script: Path,
     dmin: float,
+    dependency: str | None = None,
     dry_run: bool = False,
 ) -> str | None:
     cmd = [
         "sbatch",
         "--parsable",
+    ]
+    if dependency:
+        cmd.append(f"--dependency=afterany:{dependency}")
+    cmd += [
         str(scale_script),
         str(epoch_dir),
         str(config),
@@ -131,7 +142,8 @@ def main():
             label = CARELESS_CONFIGS.get(cfg, "unknown")
             print(f"  {epoch_dir.name} config{cfg} ({label})")
             job_id = submit_scaling_job(
-                epoch_dir, cfg, scale_script, args.dmin, args.dry_run
+                epoch_dir, cfg, scale_script, args.dmin,
+                dependency=args.dependency, dry_run=args.dry_run,
             )
             if job_id:
                 print(f"    → job {job_id}")
@@ -142,6 +154,8 @@ def main():
 
     if job_ids:
         print(f"monitor: squeue -u $USER --name=careless")
+        # Print colon-separated IDs for downstream dependency chaining
+        print(f"SCALING_JOB_IDS={':'.join(job_ids)}")
 
 
 if __name__ == "__main__":
