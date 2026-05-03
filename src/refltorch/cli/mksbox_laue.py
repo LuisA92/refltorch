@@ -530,30 +530,6 @@ def main():
         )
     print(f"extracted {n_done} shoeboxes -> {counts_path}, {masks_path}")
 
-    # --- overlap masking: zero out pixels owned by neighboring reflections ---
-    from refltorch.cli.add_overlap import compute_overlap_mask
-
-    bboxes = np.asarray(reflections["bbox"]).reshape(-1, 6).astype(np.int64)
-    xyzcal = np.asarray(
-        [list(v) for v in reflections["xyzcal.px"]], dtype=np.float64
-    )
-    print("computing overlap masks...")
-    overlap = compute_overlap_mask(bboxes, xyzcal, dz, dy, dx)
-    overlap_flat = overlap.reshape(N, dz * dy * dx)
-
-    masks_mm = np.load(masks_path, mmap_mode="r+")
-    masks_mm[:] = masks_mm & ~overlap_flat
-    masks_mm.flush()
-    del masks_mm
-
-    n_any_overlap = (overlap_flat.any(axis=1)).sum()
-    mean_overlap = overlap_flat.mean()
-    print(
-        f"overlap masking: {n_any_overlap:,} / {N:,} refls affected "
-        f"({n_any_overlap / N * 100:.1f}%), "
-        f"mean masked fraction: {mean_overlap * 100:.2f}%"
-    )
-
     # --- metadata.pt via refl_as_pt --------------------------------
     # Pass column_names explicitly so wavelength (and any laue-specific extras)
     # are picked up regardless of whether the installed refltorch's
