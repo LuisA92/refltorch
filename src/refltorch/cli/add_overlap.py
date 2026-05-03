@@ -127,26 +127,31 @@ def _process_one_image(args):
     return results
 
 
-def compute_overlap_mask(bboxes, centroids, D, H, W, nproc=1):
+def compute_overlap_mask(bboxes, centroids, D, H, W, nproc=1, image_ids=None):
     """For each reflection i, return a (D, H, W) bool array — True at pixels
     within its fixed shoebox window that are owned by another reflection.
 
     bboxes:    (N, 6)  ints  — (x0, x1, y0, y1, z0, z1) per reflection
     centroids: (N, 3)  float — (x, y, z) predicted centroid (xyzcal.px)
     nproc:     int            — number of parallel workers
+    image_ids: (N,) ints      — per-reflection image ID for grouping.
+                                If None, groups by bbox z0.
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     N = len(bboxes)
     overlap = np.zeros((N, D, H, W), dtype=bool)
 
-    z0_vals = bboxes[:, 4]
-    unique_z = np.unique(z0_vals)
+    if image_ids is not None:
+        group_keys = np.asarray(image_ids, dtype=np.int64)
+    else:
+        group_keys = bboxes[:, 4]
+    unique_groups = np.unique(group_keys)
 
     # Build work items: one per image
     work = []
-    for z in unique_z:
-        idx = np.where(z0_vals == z)[0]
+    for g in unique_groups:
+        idx = np.where(group_keys == g)[0]
         if len(idx) < 2:
             continue
         cx = centroids[idx, 0].astype(np.float32)
@@ -189,6 +194,10 @@ def parse_args():
     ap.add_argument("--w", type=int, required=True, help="Shoebox width")
     ap.add_argument("--d", type=int, required=True, help="Shoebox depth (frames)")
     ap.add_argument("--nproc", type=int, default=1, help="Number of parallel workers")
+    ap.add_argument(
+        "--metadata", default=None,
+        help="Path to metadata.pt (uses image_num for grouping instead of bbox z0)"
+    )
     return ap.parse_args()
 
 
@@ -207,6 +216,15 @@ def main():
 
     print(f"Reflections: {N:,}")
     print(f"Shoebox (D, H, W) = ({D}, {H}, {W}), V = {V:,}")
+
+    # Load image_ids from metadata.pt if provided
+    image_ids = None
+    if args.metadata is not None:
+        import torch
+        meta = torch.load(args.metadata, weights_only=False)
+        image_ids = meta["image_num"].numpy().astype(np.int64)
+        n_images = len(np.unique(image_ids))
+        print(f"Using image_num from metadata.pt ({n_images} images)")
 
     # Sanity-check bbox size matches H/W/D
     dx = bboxes[:, 1] - bboxes[:, 0]
@@ -228,7 +246,7 @@ def main():
             "check H/W/D args and the reflection file."
         )
 
-    overlap = compute_overlap_mask(bboxes, xyzcal, D, H, W, nproc=args.nproc)
+    overlap = compute_overlap_mask(bboxes, xyzcal, D, H, W, nproc=args.nproc, image_ids=image_ids)
     overlap_flat = overlap.reshape(N, V)
 
     print("Applying overlap to existing mask...")

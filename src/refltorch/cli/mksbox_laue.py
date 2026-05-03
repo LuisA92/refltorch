@@ -4,12 +4,6 @@ Differences from refltorch.mksbox (regular DIALS):
 - Each experiment is a single-frame still (no rotation scan); xyzcal.px.z
   is ~0 for all refls, so routing goes through refl["id"] (the per-image
   experiment index) instead.
-- image_num is recovered from the trailing integer in the imageset
-  filename (per laue-dials convention) and looked up via id.
-- Wavelength is read from refl["wavelength"] (laue-dials writes it).
-- Bbox edge handling shifts to preserve full size (vs clip+zero-pad).
-- --max-images selects the first N original image numbers (skips images
-  that were dropped by laue-dials integration).
 
 Run:
     refltorch.mksbox-laue \\
@@ -33,7 +27,6 @@ import torch
 from numpy.lib.format import open_memmap
 
 from refltorch.refl_utils import refl_as_pt
-
 
 _TRAILING_INT_RE = re.compile(r"_(\d+)\.[A-Za-z0-9]+$")
 
@@ -84,14 +77,20 @@ def parse_args():
         help="max parallel workers (capped by os.cpu_count())",
     )
     parser.add_argument(
-        "--refl-fname", type=str, default="reflections_.refl",
+        "--refl-fname",
+        type=str,
+        default="reflections_.refl",
         help="filename of output reflection table",
     )
     parser.add_argument(
-        "--counts-fname", type=str, default="counts.npy",
+        "--counts-fname",
+        type=str,
+        default="counts.npy",
     )
     parser.add_argument(
-        "--masks-fname", type=str, default="masks.npy",
+        "--masks-fname",
+        type=str,
+        default="masks.npy",
     )
     parser.add_argument(
         "--counts-dtype",
@@ -182,8 +181,7 @@ def _process_image_chunk(
     Opens the pre-allocated `counts.npy` / `masks.npy` memmaps in r+ mode and
     writes its slice of refls directly. Each refl_id is owned by exactly one
     worker (refls are grouped by experiment, experiments by chunk), so the
-    worker writes are at disjoint rows — POSIX page cache handles concurrent
-    disjoint writes safely without locking.
+    worker writes are at disjoint rows.
 
     image_records: list of dicts, one per image to process. Each dict has:
         - "expt_idx": int, position into the .expt's experiment list
@@ -200,9 +198,7 @@ def _process_image_chunk(
     experiments = ExperimentListFactory.from_json_file(expt_path, check_format=True)
     counts_dtype = np.dtype(counts_dtype_str)
     dtype_max = (
-        np.iinfo(counts_dtype).max
-        if np.issubdtype(counts_dtype, np.integer)
-        else None
+        np.iinfo(counts_dtype).max if np.issubdtype(counts_dtype, np.integer) else None
     )
 
     counts_mm = np.load(counts_path, mmap_mode="r+")
@@ -230,9 +226,7 @@ def _process_image_chunk(
                 int(bboxes[j, 5]),
             )
         subset["bbox"] = bbox_col
-        subset["shoebox"] = flex.shoebox(
-            subset["panel"], subset["bbox"], allocate=True
-        )
+        subset["shoebox"] = flex.shoebox(subset["panel"], subset["bbox"], allocate=True)
 
         imageset = experiments[expt_idx].imageset
         subset.extract_shoeboxes(imageset)
@@ -292,7 +286,9 @@ def _save_stats_from_memmap(
     mean_a = sum_a / nel
     var_a = sumsq_a / nel - mean_a * mean_a
 
-    torch.save(torch.tensor([mean_c, var_c], dtype=torch.float32), out_dir / stats_fname)
+    torch.save(
+        torch.tensor([mean_c, var_c], dtype=torch.float32), out_dir / stats_fname
+    )
     torch.save(torch.tensor([mean_a, var_a], dtype=torch.float32), out_dir / ans_fname)
 
 
@@ -312,7 +308,7 @@ def _save_concentration_from_memmap(
 
 
 def _convert_npy_memmap_to_pt(npy_path: Path) -> Path:
-    """Materialize a .npy file into a .pt tensor and remove the .npy.
+    """Wriate a .npy file into a .pt tensor.
 
     Reads the file fully into RAM in one shot (torch.save does not stream).
     Returns the new .pt path.
@@ -356,11 +352,12 @@ def main():
 
     print(f"loading {expt_path_in}")
     experiments = ExperimentListFactory.from_json_file(
-        str(expt_path_in), check_format=False,
+        str(expt_path_in),
+        check_format=False,
     )
     print(f"  {len(experiments)} experiments")
 
-    # --- expt_idx -> image_num map (laue-dials filename convention) ---------
+    #  expt_idx -> image_num map (laue-dials filename convention)
     expt_to_img = np.empty(len(experiments), dtype=np.int64)
     for i in range(len(experiments)):
         expt_to_img[i] = _path_to_image_num(experiments[i].imageset.get_path(0))
@@ -371,11 +368,11 @@ def main():
         f"({len(expt_to_img)} images)"
     )
 
-    # --- detector size (single-panel, taken from experiment 0) ----------------
+    # detector size (single-panel, taken from experiment 0)
     det0 = experiments[0].detector[0]
     dx_det, dy_det = det0.get_image_size()
 
-    # --- per-refl image_num via id (stills convention) -----------------------
+    #  per-refl image_num via id (stills convention)
     expt_idx_per_refl = np.array(reflections["id"]).astype(np.int64)
     if expt_idx_per_refl.min() < 0 or expt_idx_per_refl.max() >= len(experiments):
         raise ValueError(
@@ -389,14 +386,13 @@ def main():
     keep_mask = flex.bool(keep_np.tolist())
     n_kept = int(keep_np.sum())
     print(
-        f"keeping {n_kept} / {len(reflections)} refls "
-        f"(image_num < {args.max_images})"
+        f"keeping {n_kept} / {len(reflections)} refls (image_num < {args.max_images})"
     )
     reflections = reflections.select(keep_mask)
     expt_idx_per_refl = expt_idx_per_refl[keep_np]
     image_num_per_refl = image_num_per_refl[keep_np]
 
-    # --- wavelength: read from refl table (laue-dials writes it) -------------
+    # wavelength: read from refl table (laue-dials writes it)
     if "wavelength" not in reflections:
         raise ValueError(
             "refl table has no 'wavelength' column; this CLI expects laue-dials "
@@ -404,7 +400,7 @@ def main():
             "instead — open a ticket if you need that path.)"
         )
 
-    # --- bbox column with shift logic; z fixed to (0, 1) per single-frame ----
+    # bbox column with shift logic; z fixed to (0, 1) per single-frame
     x_int = flex.floor(reflections["xyzcal.px"].parts()[0]).iround()
     y_int = flex.floor(reflections["xyzcal.px"].parts()[1]).iround()
 
@@ -414,7 +410,7 @@ def main():
         bbox[j] = (x0, x1, y0, y1, 0, 1)
     reflections["bbox"] = bbox
 
-    # --- refl_ids + image_num + is_test ----------------------------------------
+    # refl_ids + image_num + is_test
     n_refl = len(reflections)
     reflections["refl_ids"] = flex.int(np.arange(n_refl, dtype=np.int32))
     reflections["image_num"] = flex.int(image_num_per_refl.astype(np.int32))
@@ -423,12 +419,12 @@ def main():
     reflections["is_test"] = flex.bool(is_test.tolist())
     print(f"  is_test: {is_test.sum()} / {n_refl} ({100 * is_test.mean():.1f}%)")
 
-    # --- d-spacing per refl via per-experiment unit cell ---------------------
+    # d-spacing per refl via per-experiment unit cell
     reflections.compute_d(experiments)
     d_arr = np.array(reflections["d"])
     print(f"  d range: {d_arr.min():.3f} - {d_arr.max():.3f} Å")
 
-    # --- save the reflection table (now also carries d) ----------------------
+    # save the reflection table (now also carries d)
     refl_path_out = out_dir / args.refl_fname
     reflections.as_file(str(refl_path_out))
     print(f"wrote refl with bbox/wavelength/refl_ids/d -> {refl_path_out}")
@@ -437,7 +433,7 @@ def main():
     identifier = dict(reflections.experiment_identifiers())
     (out_dir / "identifiers.yaml").write_text(yaml.safe_dump(identifier))
 
-    # --- crystal metadata: cell + spacegroup --------------------------------
+    # crystal metadata: cell + spacegroup
     # All per-image experiments are copies of the same refined crystal model,
     # so the first one is representative.
     crystal0 = experiments[0].crystal
@@ -449,11 +445,13 @@ def main():
         "space_group_number": int(sg_info.type().number()),
     }
     (out_dir / "crystal.yaml").write_text(yaml.safe_dump(crystal_meta))
-    print(f"wrote crystal metadata -> {out_dir / 'crystal.yaml'}: "
-          f"cell={tuple(round(c, 3) for c in crystal_meta['cell'])}, "
-          f"sg={crystal_meta['space_group']}")
+    print(
+        f"wrote crystal metadata -> {out_dir / 'crystal.yaml'}: "
+        f"cell={tuple(round(c, 3) for c in crystal_meta['cell'])}, "
+        f"sg={crystal_meta['space_group']}"
+    )
 
-    # --- group refls by expt_idx for parallel extraction ---------------------
+    # group refls by expt_idx for parallel extraction
     panels_np = np.array(reflections["panel"])
     bboxes_np = np.stack(
         [b.as_numpy_array() for b in reflections["bbox"].parts()],
@@ -474,7 +472,7 @@ def main():
         )
     print(f"prepared {len(image_records)} image records for extraction")
 
-    # --- chunk and run in parallel -------------------------------------------
+    #  chunk and run in parallel
     block_size = args.block_size
     chunks = [
         image_records[i : i + block_size]
@@ -484,19 +482,23 @@ def main():
     max_workers = min(args.max_workers, os.cpu_count() or 1)
     print(f"running {len(chunks)} chunks across {max_workers} workers")
 
-    # Pre-allocate output memmaps and close them — workers reopen in r+ mode
-    # and write their disjoint slices directly. This avoids returning ~110 MB
-    # arrays per chunk through the IPC pipe to main.
+    # Pre-allocate output memmaps and close them
     N = len(refl_ids_np)
     counts_path = out_dir / args.counts_fname
     masks_path = out_dir / args.masks_fname
     counts_dtype = np.dtype(args.counts_dtype)
 
     counts_mm = open_memmap(
-        counts_path, mode="w+", dtype=counts_dtype, shape=(N, dz * dy * dx),
+        counts_path,
+        mode="w+",
+        dtype=counts_dtype,
+        shape=(N, dz * dy * dx),
     )
     masks_mm = open_memmap(
-        masks_path, mode="w+", dtype=np.bool_, shape=(N, dz * dy * dx),
+        masks_path,
+        mode="w+",
+        dtype=np.bool_,
+        shape=(N, dz * dy * dx),
     )
     counts_mm.flush()
     masks_mm.flush()
@@ -510,7 +512,9 @@ def main():
                 _process_image_chunk,
                 chunk,
                 str(expt_path_in),
-                dz, dy, dx,
+                dz,
+                dy,
+                dx,
                 str(counts_path),
                 str(masks_path),
                 args.counts_dtype,
@@ -530,12 +534,9 @@ def main():
         )
     print(f"extracted {n_done} shoeboxes -> {counts_path}, {masks_path}")
 
-    # --- metadata.pt via refl_as_pt --------------------------------
-    # Pass column_names explicitly so wavelength (and any laue-specific extras)
-    # are picked up regardless of whether the installed refltorch's
-    # SCALAR_DTYPES has been updated. Belt and suspenders against stale
-    # installs on shared clusters.
+    #  metadata.pt via refl_as_pt
     from refltorch.refl_utils.refl_utils import DEFAULT_REFL_COLS
+
     cols = list(DEFAULT_REFL_COLS)
     for must_have in ("wavelength", "d", "image_num", "is_test"):
         if must_have not in cols:
