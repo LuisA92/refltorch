@@ -85,6 +85,7 @@ echo "===== Starting integrator.train ====="
 integrator.train -v \
     --config "$config" \
     --wb-project "$wb_project" \
+    --save-dir "/n/netscratch/hekstra_lab/Lab/laldama/lightning_logs/" \
     --qbg "$surrogate" \
     --qi "$surrogate" \
     --run-dir "$run_dir" \
