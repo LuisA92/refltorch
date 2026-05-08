@@ -30,7 +30,7 @@ surrogate=${2:?   "Usage: train.sh <config> <surrogate> [wb_project]"}
 wb_project=${3:-"PolyModel"}
 
 # Careless configs to run (space-separated)
-SCALE_CONFIGS="${SCALE_CONFIGS:-3 4 6}"
+SCALE_CONFIGS="${SCALE_CONFIGS:-4}"
 
 # --- Paths ---
 INTEGRATOR_ROOT="${INTEGRATOR_ROOT:?INTEGRATOR_ROOT must be set (add to ~/.bashrc).}"
