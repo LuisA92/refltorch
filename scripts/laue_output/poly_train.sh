@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -c 16
 #SBATCH -N 1
-#SBATCH -p gpu
+#SBATCH -p gpu_test
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem=200G
@@ -40,12 +40,12 @@ SCRIPTS="$REFLTORCH_ROOT/scripts/laue_output"
 
 # --- Resolve config ---
 if [[ -f "$config_arg" ]]; then
-    config="$(realpath "$config_arg")"
+  config="$(realpath "$config_arg")"
 elif [[ -f "$INTEGRATOR_CONFIGS/$config_arg" ]]; then
-    config="$(realpath "$INTEGRATOR_CONFIGS/$config_arg")"
+  config="$(realpath "$INTEGRATOR_CONFIGS/$config_arg")"
 else
-    echo "ERROR: config '$config_arg' not found." >&2
-    exit 1
+  echo "ERROR: config '$config_arg' not found." >&2
+  exit 1
 fi
 
 echo "===== Resolved config: $config ====="
@@ -83,37 +83,37 @@ echo "===== Run dir:   $(realpath "$run_dir") ====="
 # =====================================================================
 echo "===== Starting integrator.train ====="
 integrator.train -v \
-    --config "$config" \
-    --wb-project "$wb_project" \
-    --save-dir "/n/netscratch/hekstra_lab/Lab/laldama/lightning_logs/" \
-    --qbg "$surrogate" \
-    --qi "$surrogate" \
-    --run-dir "$run_dir" \
-    --tags "$config_label" "$surrogate" "pi-${i_prior}" "pbg-${bg_prior}"
+  --config "$config" \
+  --wb-project "$wb_project" \
+  --save-dir "/n/netscratch/hekstra_lab/Lab/laldama/lightning_logs/" \
+  --qbg "$surrogate" \
+  --qi "$surrogate" \
+  --run-dir "$run_dir" \
+  --tags "$config_label" "$surrogate" "pi-${i_prior}" "pbg-${bg_prior}"
 
 # =====================================================================
 # 2. Predict + write MTZ
 # =====================================================================
 echo "===== Starting integrator.pred ====="
 integrator.pred -v \
-    --run-dir "$run_dir" \
-    --write-mtz preds.mtz \
-    --save-preds-as parquet
+  --run-dir "$run_dir" \
+  --write-mtz preds.mtz \
+  --save-preds-as parquet
 
 # =====================================================================
 # 3. Submit Careless scaling (separate SLURM jobs — crls env)
 # =====================================================================
 echo "===== Submitting Careless scaling (configs: $SCALE_CONFIGS) ====="
 scaling_output=$(python "$SCRIPTS/submit_scaling.py" \
-    --run-dir "$run_dir" \
-    --configs $SCALE_CONFIGS)
+  --run-dir "$run_dir" \
+  --configs $SCALE_CONFIGS)
 echo "$scaling_output"
 
 # Extract colon-separated job IDs for dependency chaining
 SCALING_IDS=$(echo "$scaling_output" | grep '^SCALING_JOB_IDS=' | cut -d= -f2)
 if [[ -z "$SCALING_IDS" ]]; then
-    echo "WARNING: No scaling job IDs captured; refinement/analysis will not be submitted."
-    exit 0
+  echo "WARNING: No scaling job IDs captured; refinement/analysis will not be submitted."
+  exit 0
 fi
 
 # =====================================================================
@@ -121,15 +121,15 @@ fi
 # =====================================================================
 echo "===== Submitting refinement (depends on scaling: $SCALING_IDS) ====="
 refinement_output=$(python "$SCRIPTS/submit_refinement.py" \
-    --run-dir "$run_dir" \
-    --configs $SCALE_CONFIGS \
-    --dependency "$SCALING_IDS")
+  --run-dir "$run_dir" \
+  --configs $SCALE_CONFIGS \
+  --dependency "$SCALING_IDS")
 echo "$refinement_output"
 
 REFINEMENT_IDS=$(echo "$refinement_output" | grep '^REFINEMENT_JOB_IDS=' | cut -d= -f2)
 if [[ -z "$REFINEMENT_IDS" ]]; then
-    echo "WARNING: No refinement job IDs captured; analysis will not be submitted."
-    exit 0
+  echo "WARNING: No refinement job IDs captured; analysis will not be submitted."
+  exit 0
 fi
 
 # =====================================================================
@@ -137,9 +137,9 @@ fi
 # =====================================================================
 echo "===== Submitting analysis (depends on refinement: $REFINEMENT_IDS) ====="
 python "$SCRIPTS/submit_analysis.py" \
-    --run-dir "$run_dir" \
-    --configs $SCALE_CONFIGS \
-    --dependency "$REFINEMENT_IDS"
+  --run-dir "$run_dir" \
+  --configs $SCALE_CONFIGS \
+  --dependency "$REFINEMENT_IDS"
 
 echo ""
 echo "===== Full pipeline submitted ====="
