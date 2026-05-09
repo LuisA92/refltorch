@@ -138,6 +138,8 @@ def main():
 
     job_ids = []
     for epoch_dir in epoch_dirs:
+        # Pre-create scaling dir so downstream submit scripts can find it
+        (epoch_dir / "scaling").mkdir(exist_ok=True)
         for cfg in args.configs:
             label = CARELESS_CONFIGS.get(cfg, "unknown")
             print(f"  {epoch_dir.name} config{cfg} ({label})")

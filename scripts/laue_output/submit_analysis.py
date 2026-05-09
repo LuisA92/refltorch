@@ -73,30 +73,31 @@ def build_analysis_script(
     pdb: Path,
     elements: str,
     peak_script: str,
+    assume_exists: bool = False,
 ) -> str | None:
     prefix = f"config{config}"
     refine_dir = scaling_dir / f"{prefix}_refine"
     refined_mtz = refine_dir / "refine2" / "refined_2.mtz"
 
-    if not refined_mtz.exists():
+    if not assume_exists and not refined_mtz.exists():
         return None
 
     peaks_csv = scaling_dir / f"{prefix}_peaks.csv"
 
-    # Determine which xval MTZ to use for ccanom
+    # Build xval/ccanom section — all file checks happen at bash runtime,
+    # not at Python submission time (files don't exist yet when using --dependency).
     if config in FRIEDEL_SPLIT_CONFIGS:
         xval_plus = scaling_dir / f"{prefix}_xval_0.mtz"
         xval_minus = scaling_dir / f"{prefix}_xval_1.mtz"
         xval_merged = scaling_dir / f"{prefix}_xval_merged.mtz"
-        if not xval_plus.exists() or not xval_minus.exists():
-            xval_section = f'echo "xval MTZ not found for {prefix}, skipping ccanom"'
-        else:
-            xval_section = textwrap.dedent(f"""\
-                # Unfriedelize xval for ccanom
+        xval_section = textwrap.dedent(f"""\
+            if [ -f "{xval_plus}" ] && [ -f "{xval_minus}" ]; then
                 source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
                 micromamba activate crls
 
-                python3 -c "
+                # Unfriedelize xval if needed
+                if [ ! -f "{xval_merged}" ]; then
+                    python3 -c "
 import reciprocalspaceship as rs
 
 plus = rs.read_mtz('{xval_plus}')
@@ -119,20 +120,32 @@ out = rs.concat(half_repeats)
 out.write_mtz('{xval_merged}')
 print(f'wrote {{len(out)}} refls to {xval_merged.name}')
 "
+                fi
                 careless.ccanom "{xval_merged}" -o "{scaling_dir}/{prefix}_ccanom.csv" -i "{scaling_dir}/{prefix}_ccanom.png"
-            """)
+            else
+                echo "xval MTZ not found for {prefix}, skipping ccanom"
+            fi
+        """)
     else:
         xval_mtz = scaling_dir / f"{prefix}_xval_0.mtz"
-        if not xval_mtz.exists():
-            xval_section = f'echo "xval MTZ not found for {prefix}, skipping ccanom"'
-        else:
-            xval_section = textwrap.dedent(f"""\
+        xval_section = textwrap.dedent(f"""\
+            if [ -f "{xval_mtz}" ]; then
                 source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
                 micromamba activate crls
                 careless.ccanom "{xval_mtz}" -o "{scaling_dir}/{prefix}_ccanom.csv" -i "{scaling_dir}/{prefix}_ccanom.png"
-            """)
+            else
+                echo "xval MTZ not found for {prefix}, skipping ccanom"
+            fi
+        """)
 
     script = f"""#!/bin/bash
+set -eo pipefail
+
+if [ ! -f "{refined_mtz}" ]; then
+    echo "ERROR: {refined_mtz} not found, skipping analysis"
+    exit 1
+fi
+
 source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
 
 # Peak heights (integrator env)
@@ -161,15 +174,18 @@ def main():
     print(f"configs:  {args.configs}")
     print()
 
+    assume_exists = args.dependency is not None
+
     job_ids = []
     for epoch_dir in epoch_dirs:
         scaling_dir = epoch_dir / "scaling"
-        if not scaling_dir.exists():
+        if not assume_exists and not scaling_dir.exists():
             continue
 
         for cfg in args.configs:
             script_content = build_analysis_script(
                 scaling_dir, cfg, args.pdb, args.elements, args.peak_script,
+                assume_exists=assume_exists,
             )
             if script_content is None:
                 print(f"  {epoch_dir.name} config{cfg}: refined MTZ not found, skipping")

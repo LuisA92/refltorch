@@ -86,11 +86,17 @@ def unfriedelize(plus_mtz: Path, minus_mtz: Path, out_mtz: Path):
     print(f"  unfriedelized → {out_mtz.name} ({len(out)} refls)")
 
 
-def get_mtz_for_config(scaling_dir: Path, config: int) -> Path | None:
-    """Find or create the MTZ to refine for a given config."""
+def get_mtz_for_config(
+    scaling_dir: Path, config: int, assume_exists: bool = False,
+) -> Path | None:
+    """Find or create the MTZ to refine for a given config.
+
+    When assume_exists=True (dependency-based submission), skip file
+    existence checks and return the expected path.
+    """
     if config in SINGLE_MTZ_CONFIGS:
         mtz = scaling_dir / f"config{config}_0.mtz"
-        if mtz.exists():
+        if assume_exists or mtz.exists():
             return mtz
         return None
 
@@ -98,9 +104,9 @@ def get_mtz_for_config(scaling_dir: Path, config: int) -> Path | None:
         plus = scaling_dir / f"config{config}_0.mtz"
         minus = scaling_dir / f"config{config}_1.mtz"
         merged = scaling_dir / f"config{config}_merged_anom.mtz"
-        if not plus.exists() or not minus.exists():
+        if not assume_exists and (not plus.exists() or not minus.exists()):
             return None
-        if not merged.exists():
+        if not assume_exists and not merged.exists():
             unfriedelize(plus, minus, merged)
         return merged
 
@@ -109,6 +115,7 @@ def get_mtz_for_config(scaling_dir: Path, config: int) -> Path | None:
 
 def submit_refinement(
     mtz: Path,
+    config: int,
     refine_dir: Path,
     pdb: Path,
     eff1: Path,
@@ -118,29 +125,58 @@ def submit_refinement(
 ) -> str | None:
     refine_dir.mkdir(parents=True, exist_ok=True)
 
-    script = textwrap.dedent(f"""\
-        #!/bin/bash
-        source /n/hekstra_lab_tier0/Lab/garden/phenix_1_20/phenix-1.20.1-4487/phenix_env.sh
+    # For Friedel configs, unfriedelize at runtime if merged MTZ doesn't exist
+    unfriedelize_block = ""
+    if config in FRIEDEL_SPLIT_CONFIGS:
+        scaling_dir = mtz.parent
+        plus = scaling_dir / f"config{config}_0.mtz"
+        minus = scaling_dir / f"config{config}_1.mtz"
+        unfriedelize_block = textwrap.dedent(f"""\
+            # Unfriedelize if needed
+            if [ ! -f "{mtz}" ]; then
+                source /n/hekstra_lab/people/aldama/micromamba/etc/profile.d/mamba.sh
+                micromamba activate crls
+                python3 -c "
+import reciprocalspaceship as rs
+plus = rs.read_mtz('{plus}')
+minus = rs.read_mtz('{minus}')
+anom_keys = ['F(+)', 'SigF(+)', 'F(-)', 'SigF(-)', 'N(+)', 'N(-)']
+out = rs.concat([plus, minus.apply_symop('-x,-y,-z')]).unstack_anomalous()[anom_keys]
+out.write_mtz('{mtz}')
+print(f'unfriedelized -> {mtz.name} ({{len(out)}} refls)')
+"
+            fi
+        """)
 
-        refine1="{refine_dir}/refine1"
-        refine2="{refine_dir}/refine2"
-        mkdir -p "$refine1" "$refine2"
+    script = f"""#!/bin/bash
+set -eo pipefail
+{unfriedelize_block}
+if [ ! -f "{mtz}" ]; then
+    echo "ERROR: {mtz.name} not found, skipping refinement"
+    exit 1
+fi
 
-        cd "$refine1"
-        phenix.refine "{eff1}" \\
-            refinement.input.xray_data.file_name="{mtz}" \\
-            refinement.input.pdb.file_name="{pdb}" \\
-            refinement.output.prefix=refined \\
-            --overwrite
+source /n/hekstra_lab_tier0/Lab/garden/phenix_1_20/phenix-1.20.1-4487/phenix_env.sh
 
-        cd "$refine2"
-        phenix.refine "{eff2}" \\
-            refinement.input.xray_data.file_name="${{refine1}}/refined_data.mtz" \\
-            refinement.input.pdb.file_name="${{refine1}}/refined_1.pdb" \\
-            refinement.input.xray_data.r_free_flags.file_name="${{refine1}}/refined_data.mtz" \\
-            refinement.output.prefix=refined \\
-            --overwrite
-    """)
+refine1="{refine_dir}/refine1"
+refine2="{refine_dir}/refine2"
+mkdir -p "$refine1" "$refine2"
+
+cd "$refine1"
+phenix.refine "{eff1}" \\
+    refinement.input.xray_data.file_name="{mtz}" \\
+    refinement.input.pdb.file_name="{pdb}" \\
+    refinement.output.prefix=refined \\
+    --overwrite
+
+cd "$refine2"
+phenix.refine "{eff2}" \\
+    refinement.input.xray_data.file_name="${{refine1}}/refined_data.mtz" \\
+    refinement.input.pdb.file_name="${{refine1}}/refined_1.pdb" \\
+    refinement.input.xray_data.r_free_flags.file_name="${{refine1}}/refined_data.mtz" \\
+    refinement.output.prefix=refined \\
+    --overwrite
+"""
 
     script_path = refine_dir / "refine.sh"
     script_path.write_text(script)
@@ -182,15 +218,17 @@ def main():
     print(f"pdb:      {args.pdb}")
     print()
 
+    assume_exists = args.dependency is not None
+
     job_ids = []
     for epoch_dir in epoch_dirs:
         scaling_dir = epoch_dir / "scaling"
-        if not scaling_dir.exists():
+        if not assume_exists and not scaling_dir.exists():
             print(f"  {epoch_dir.name}: no scaling dir, skipping")
             continue
 
         for cfg in args.configs:
-            mtz = get_mtz_for_config(scaling_dir, cfg)
+            mtz = get_mtz_for_config(scaling_dir, cfg, assume_exists=assume_exists)
             if mtz is None:
                 print(f"  {epoch_dir.name} config{cfg}: MTZ not found, skipping")
                 continue
@@ -199,7 +237,7 @@ def main():
             print(f"  {epoch_dir.name} config{cfg}: {mtz.name}")
 
             job_id = submit_refinement(
-                mtz, refine_dir, args.pdb, args.eff1, args.eff2,
+                mtz, cfg, refine_dir, args.pdb, args.eff1, args.eff2,
                 dependency=args.dependency, dry_run=args.dry_run,
             )
             if job_id:
