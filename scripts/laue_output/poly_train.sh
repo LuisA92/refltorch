@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -c 16
 #SBATCH -N 1
-#SBATCH -p gpu
+#SBATCH -p gpu_test
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem=200G
