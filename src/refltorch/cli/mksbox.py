@@ -111,6 +111,12 @@ def parse_args():
         default=10_000,
         help="Reflections per chunk when computing stats from the memmap",
     )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of reflections to flag as is_test (random)",
+    )
     return parser.parse_args()
 
 
@@ -499,7 +505,14 @@ def main():
     reflections["bbox"] = bbox
 
     # assign ids
-    reflections["refl_ids"] = flex.int(np.arange(len(reflections)))
+    n_refl = len(reflections)
+    reflections["refl_ids"] = flex.int(np.arange(n_refl))
+
+    # assign test flags
+    rng = np.random.default_rng(42)
+    is_test = rng.random(n_refl) < args.test_fraction
+    reflections["is_test"] = flex.bool(is_test.tolist())
+    print(f"  is_test: {is_test.sum()} / {n_refl} ({100 * is_test.mean():.1f}%)")
 
     # add z_px and sort
     reflections["z_px"] = reflections["xyzcal.px"].parts()[2]

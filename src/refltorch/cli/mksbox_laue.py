@@ -31,6 +31,28 @@ from refltorch.refl_utils import refl_as_pt
 _TRAILING_INT_RE = re.compile(r"_(\d+)\.[A-Za-z0-9]+$")
 
 
+def _fast_beam_center_px(expt_path: Path) -> tuple[float, float]:
+    """Extract beam center in pixels from .expt JSON without loading images."""
+    import json
+
+    with open(expt_path) as f:
+        data = json.load(f)
+
+    s0 = np.array(data["beam"][0]["direction"])
+    panel = data["detector"][0]["panels"][0]
+    origin = np.array(panel["origin"])
+    fast = np.array(panel["fast_axis"])
+    slow = np.array(panel["slow_axis"])
+    pix = panel["pixel_size"]
+
+    normal = np.cross(fast, slow)
+    t = -origin.dot(normal) / s0.dot(normal)
+    bc_mm = t * s0 - origin
+    cx = bc_mm.dot(fast) / pix[0]
+    cy = bc_mm.dot(slow) / pix[1]
+    return (cx, cy)
+
+
 def _path_to_image_num(path: str) -> int:
     """Parse the trailing integer in a laue-dials image filename.
 
@@ -433,22 +455,27 @@ def main():
     identifier = dict(reflections.experiment_identifiers())
     (out_dir / "identifiers.yaml").write_text(yaml.safe_dump(identifier))
 
-    # crystal metadata: cell + spacegroup
+    # crystal metadata: cell + spacegroup + beam center
     # All per-image experiments are copies of the same refined crystal model,
     # so the first one is representative.
     crystal0 = experiments[0].crystal
     cell_params = crystal0.get_unit_cell().parameters()
     sg_info = crystal0.get_space_group().info()
+
+    beam_center_px = _fast_beam_center_px(expt_path_in)
+
     crystal_meta = {
         "cell": [float(x) for x in cell_params],
         "space_group": sg_info.symbol_and_number(),
         "space_group_number": int(sg_info.type().number()),
+        "beam_center_px": [float(beam_center_px[0]), float(beam_center_px[1])],
     }
     (out_dir / "crystal.yaml").write_text(yaml.safe_dump(crystal_meta))
     print(
         f"wrote crystal metadata -> {out_dir / 'crystal.yaml'}: "
         f"cell={tuple(round(c, 3) for c in crystal_meta['cell'])}, "
-        f"sg={crystal_meta['space_group']}"
+        f"sg={crystal_meta['space_group']}, "
+        f"beam_center_px=({beam_center_px[0]:.1f}, {beam_center_px[1]:.1f})"
     )
 
     # group refls by expt_idx for parallel extraction
