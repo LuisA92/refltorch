@@ -68,7 +68,7 @@ def main():
         phenix_eff="/n/holylabs/LABS/hekstra_lab/Users/laldama/integrato_refac/integrator/reference_data/phenix.eff",
         dials_env="/n/hekstra_lab/people/aldama/software/dials-v3-16-1/dials_env.sh",
         phenix_env="/n/hekstra_lab/garden_backup/phenix-1.21/phenix-1.21.1-5286/phenix_env.sh",
-        expt_file="/n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/dials_2026_05_14/integrated.expt",
+        expt_file="/n/hekstra_lab/people/aldama/integrator_data/hewl_9b7c/dials_2026-05-14/integrated.expt",
         pdb="/n/holylabs/LABS/hekstra_lab/Users/laldama/integrato_refac/integrator/reference_data/9b7c.pdb",
         paired_ref_eff="/n/holylabs/LABS/hekstra_lab/Users/laldama/integrato_refac/integrator/reference_data/paired_refinement_ref.eff",
         paired_model_eff="/n/holylabs/LABS/hekstra_lab/Users/laldama/integrato_refac/integrator/reference_data/paired_refinement_model.eff",
