@@ -23,7 +23,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from refltorch.io import load_config
+from refltorch.io import open_run
+from refltorch.plots import save_figure
 
 
 def _load_checkpoint(log_dir: Path, epoch: int | None) -> dict:
@@ -155,19 +156,22 @@ def _plot_tau_comparison(stats: dict, epoch: int, save_dir: Path):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Add d-spacing as secondary x-axis
-    ax2 = ax.secondary_xaxis("top", functions=(
-        lambda s2: 1.0 / (2.0 * np.sqrt(np.maximum(s2, 1e-12))),
-        lambda d: 1.0 / (4.0 * d**2),
-    ))
+    # Add d-spacing as secondary x-axis with fixed tick positions
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    d_ticks = np.array([1.0, 1.2, 1.5, 2.0, 3.0, 5.0])
+    s2_ticks = 1.0 / (4.0 * d_ticks**2)
+    s2_lo, s2_hi = ax.get_xlim()
+    mask = (s2_ticks >= s2_lo) & (s2_ticks <= s2_hi)
+    ax2.set_xticks(s2_ticks[mask])
+    ax2.set_xticklabels([f"{d:.1f}" for d in d_ticks[mask]])
     ax2.set_xlabel("d-spacing ($\\AA$)")
 
-    fig.savefig(
+    save_figure(
+        fig,
         save_dir / f"wilson_tau_epoch_{epoch}.png",
-        dpi=150, facecolor="white",
-        bbox_inches="tight", pad_inches=0.05,
+        dpi=150, pad_inches=0.05, transparent=False,
     )
-    plt.close(fig)
 
 
 def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
@@ -210,19 +214,22 @@ def _plot_wilson_curve(stats: dict, epoch: int, save_dir: Path):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Add d-spacing as secondary x-axis
-    ax2 = ax.secondary_xaxis("top", functions=(
-        lambda s2: 1.0 / (2.0 * np.sqrt(np.maximum(s2, 1e-12))),
-        lambda d: 1.0 / (4.0 * d**2),
-    ))
+    # Add d-spacing as secondary x-axis with fixed tick positions
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    d_ticks = np.array([1.0, 1.2, 1.5, 2.0, 3.0, 5.0])
+    s2_ticks = 1.0 / (4.0 * d_ticks**2)
+    s2_lo, s2_hi = ax.get_xlim()
+    mask = (s2_ticks >= s2_lo) & (s2_ticks <= s2_hi)
+    ax2.set_xticks(s2_ticks[mask])
+    ax2.set_xticklabels([f"{d:.1f}" for d in d_ticks[mask]])
     ax2.set_xlabel("d-spacing ($\\AA$)")
 
-    fig.savefig(
+    save_figure(
+        fig,
         save_dir / f"wilson_curve_epoch_{epoch}.png",
-        dpi=150, facecolor="white",
-        bbox_inches="tight", pad_inches=0.05,
+        dpi=150, pad_inches=0.05, transparent=False,
     )
-    plt.close(fig)
 
 
 def _plot_bg_rate(stats: dict, epoch: int, save_dir: Path):
@@ -245,12 +252,11 @@ def _plot_bg_rate(stats: dict, epoch: int, save_dir: Path):
     ))
     ax2.set_xlabel("d-spacing ($\\AA$)")
 
-    fig.savefig(
+    save_figure(
+        fig,
         save_dir / f"bg_rate_per_bin_epoch_{epoch}.png",
-        dpi=150, facecolor="white",
-        bbox_inches="tight", pad_inches=0.05,
+        dpi=150, pad_inches=0.05, transparent=False,
     )
-    plt.close(fig)
 
 
 def _plot_posterior_summary(stats: dict, epoch: int, save_dir: Path):
@@ -282,12 +288,11 @@ def _plot_posterior_summary(stats: dict, epoch: int, save_dir: Path):
         ax.grid(True, alpha=0.2)
 
     fig.tight_layout()
-    fig.savefig(
+    save_figure(
+        fig,
         save_dir / f"wilson_KB_posterior_epoch_{epoch}.png",
-        dpi=150, facecolor="white",
-        bbox_inches="tight", pad_inches=0.05,
+        dpi=150, pad_inches=0.05, transparent=False,
     )
-    plt.close(fig)
 
 
 def _print_summary(stats: dict, epoch: int):
@@ -331,9 +336,7 @@ def main():
     args = parser.parse_args()
 
     # Resolve paths
-    run_metadata = list(args.run_dir.glob("run_metadata.yaml"))[0]
-    config = load_config(run_metadata)
-    wandb_log = Path(config["wandb"]["log_dir"]).parent
+    config, wandb_log = open_run(args.run_dir)
 
     if args.save_dir is not None:
         save_dir = args.save_dir

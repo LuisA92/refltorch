@@ -11,12 +11,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import seaborn as sns
 import torch
 import wandb
 from dials.array_family import flex
 
-from refltorch.io import load_config
+from refltorch.io import epoch_from_path, load_config
+from refltorch.plots import cubehelix_cmap, get_cube_helix_map, save_figure
+from refltorch.tools import parse_phenix_r_values
 
 
 class ReflectionTable:
@@ -265,7 +266,14 @@ if __name__ == "__main__":
     # data.plot_metric_diff(axes[2, 1], "avg_kl", log=True)
 
     plt.tight_layout()
-    plt.savefig(f"{path.as_posix()}/avg_metrics.png", dpi=600)
+    save_figure(
+        plt.gcf(),
+        f"{path.as_posix()}/avg_metrics.png",
+        dpi=600,
+        transparent=False,
+        bbox_inches=None,
+        close=False,
+    )
     wandb.log({"Avg metrics": wandb.Image(plt.gcf())})
     plt.clf()
 
@@ -314,8 +322,8 @@ if __name__ == "__main__":
     }
 
     fig, axes = plt.subplots(2, 2, figsize=(20, 10))
-    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
-    cmap_list = cmap(np.linspace(0.0, 1, len(data.val_epochs[1:]), retstep=2)[0])
+    cmap = cubehelix_cmap(start=0.5, rot=-0.55, dark=0, light=0.8)
+    cmap_list = get_cube_helix_map(len(data.val_epochs[1:]))
     axes = axes.ravel()
 
     for ax, metric in zip(axes, metrics):
@@ -355,7 +363,14 @@ if __name__ == "__main__":
         fontsize=16,
     )
     plt.tight_layout()
-    plt.savefig(f"{path.as_posix()}/merging_stats.png", dpi=600)
+    save_figure(
+        plt.gcf(),
+        f"{path.as_posix()}/merging_stats.png",
+        dpi=600,
+        transparent=False,
+        bbox_inches=None,
+        close=False,
+    )
 
     wandb.log({"Merging Stats": wandb.Image(plt.gcf())})
     plt.clf()
@@ -448,9 +463,6 @@ if __name__ == "__main__":
     # NOTE: Code to get start/final r-free and r-work from phenix.logs
     # reference_path = Path("/Users/luis/Downloads/lightning_logs/reference_data")
 
-    # string to match
-    pattern1 = re.compile(r"Start R-work")
-    pattern2 = re.compile(r"Final R-work")
     log_files = list(path.glob("**/phenix_out/refine*.log"))
     log_files.insert(0, list(reference_path.glob("**/refine*.log"))[0])
 
@@ -462,25 +474,20 @@ if __name__ == "__main__":
     rfree_final = []
 
     for log_file in log_files:
-        with log_file.open("r") as f:
-            lines = f.readlines()
         if re.search("epoch", log_file.as_posix()):
-            epoch = re.findall(r"epoch_\d*", log_file.as_posix())[0].split("_")[-1]
+            epoch = str(epoch_from_path(log_file))
 
         else:
             epoch = "reference"
 
-        matched_lines_start = [line.strip() for line in lines if pattern1.search(line)]
-        matched_lines_final = [line.strip() for line in lines if pattern2.search(line)]
+        r_values = parse_phenix_r_values(log_file)
 
-        if matched_lines_start:
-            epoch_start.append(epoch)
-            rwork_start.append(re.findall(r"\d+\.\d+", matched_lines_start[0])[0])
-            rfree_start.append(re.findall(r"\d+\.\d+", matched_lines_start[0])[1])
-        if matched_lines_final:
-            epoch_final.append(epoch)
-            rwork_final.append(re.findall(r"\d+\.\d+", matched_lines_final[0])[0])
-            rfree_final.append(re.findall(r"\d+\.\d+", matched_lines_final[0])[1])
+        epoch_start.append(epoch)
+        rwork_start.append(str(r_values["r_work_start"]))
+        rfree_start.append(str(r_values["r_free_start"]))
+        epoch_final.append(epoch)
+        rwork_final.append(str(r_values["r_work_final"]))
+        rfree_final.append(str(r_values["r_free_final"]))
 
     rvals_df = pl.DataFrame(
         {
@@ -724,7 +731,7 @@ if __name__ == "__main__":
 
     pred_dfs = []
     for p in pred_list:
-        epoch = re.findall(r"epoch_\d*", p.as_posix())[0].split("_")[-1]
+        epoch = epoch_from_path(p)
         preds = torch.load(p, weights_only=False)
         sample_dict = dict()
         for c in (

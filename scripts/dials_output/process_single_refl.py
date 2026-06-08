@@ -1,21 +1,10 @@
 import argparse
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
+from out_utils import DialsPhenixConfig as RunPaths
+
 from refltorch.io import load_config
-
-
-@dataclass
-class RunPaths:
-    refl_files: list[str]
-    phenix_eff: str
-    dials_env: str
-    phenix_env: str
-    expt_file: str
-    paired_ref_eff: str
-    paired_model_eff: str
-    pdb: str
 
 
 def parse_args():
@@ -179,6 +168,17 @@ def process_single_refl(
     )
     print("Executing scale command:", scale_command)
     run_dials(dials_env, scale_command)
+
+    # Extract refl_ids flagged as outlier_in_scaling -> scaling_outliers.parquet
+    outliers_out = output_dir / "scaling_outliers.parquet"
+    extract_script = Path(__file__).resolve().parent / "extract_scaling_outliers.py"
+    outliers_command = (
+        f"dials.python '{extract_script}' "
+        f"--refl '{scaled_refl_out}' "
+        f"--output '{outliers_out}'"
+    )
+    print("Executing outlier extraction:", outliers_command)
+    run_dials(dials_env, outliers_command)
 
     # Run dials.merge
     merge_mtz_out = output_dir / "merged.mtz"

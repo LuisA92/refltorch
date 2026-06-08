@@ -21,7 +21,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from refltorch.io import load_config
+from refltorch.io import glob_predictions, open_run
+from refltorch.plots import save_figure
 
 SCATTER_DEFS = [
     {
@@ -113,11 +114,7 @@ def _plot_scatter_grid(
 
     fig.suptitle(title, fontsize=14, y=1.01)
     fig.tight_layout()
-    fig.savefig(
-        save_path, dpi=150, facecolor="white",
-        bbox_inches="tight", pad_inches=0.05,
-    )
-    plt.close(fig)
+    save_figure(fig, save_path, dpi=150, pad_inches=0.05, transparent=False)
 
 
 def main():
@@ -140,10 +137,7 @@ def main():
     args = parser.parse_args()
 
     # Resolve paths from run_metadata.yaml
-    run_metadata = list(args.run_dir.glob("run_metadata.yaml"))[0]
-    config = load_config(run_metadata)
-    wandb_log = Path(config["wandb"]["log_dir"]).parent
-    preds_dir = wandb_log / "predictions"
+    _config, wandb_log = open_run(args.run_dir)
 
     if args.save_dir is not None:
         save_dir = args.save_dir
@@ -151,9 +145,11 @@ def main():
         save_dir = wandb_log / "plots" / "scatter_by_bin"
 
     # Load predictions
-    parquets = sorted(preds_dir.glob("**/preds_*.parquet"))
+    parquets = glob_predictions(wandb_log, "preds_*.parquet")
     if not parquets:
-        raise FileNotFoundError(f"No parquet files found in {preds_dir}")
+        raise FileNotFoundError(
+            f"No parquet files found in {wandb_log / 'predictions'}"
+        )
     print(f"Found {len(parquets)} parquet files")
 
     df = pl.read_parquet(parquets)

@@ -1,5 +1,4 @@
 import argparse
-import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -7,10 +6,29 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import seaborn as sns
 from matplotlib.figure import Figure
+from out_utils import (
+    DIALS_EDGES_9B7C,
+    INTENSITY_EDGES,
+    read_peaks_csv,
+)
 
-from refltorch.io import load_config
+from refltorch.io import epoch_from_path, glob_predictions, open_run
+from refltorch.plots._shared import get_bins as _get_bins
+from refltorch.plots._shared import save_figure
+from refltorch.plots.cmaps import get_cube_helix_map
+from refltorch.tools import (
+    get_reference_data as _get_reference_data,
+)
+from refltorch.tools import (
+    get_reference_data_path as _get_reference_data_path,
+)
+from refltorch.tools import (
+    get_reference_metadata as _get_reference_metadata,
+)
+from refltorch.tools import (
+    parse_dials_merging_stats,
+)
 
 
 def parse_args():
@@ -48,15 +66,7 @@ def plot_anomalous_peaks(
     peak_dfs = {}
     seqids = {}
     for n, p in enumerate(peaks):
-        peak_dfs[n] = pl.read_csv(
-            p,
-            columns=["seqid", "residue", "peakz"],
-            schema_overrides={
-                "seqid": pl.Int64,
-                "residue": pl.String,
-                "peakz": pl.Float64,
-            },
-        ).sort("seqid")
+        peak_dfs[n] = read_peaks_csv(p)
 
         for s, r in peak_dfs[n][["seqid", "residue"]].iter_rows():
             seqids[s] = r
@@ -135,8 +145,7 @@ def plot_merging_stat_subplots(
 ) -> Figure:
     # Plot merging stat subplots
     n_logged_epochs = len([int(k) for k in list(dfs.keys())])
-    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
-    cmap_list = cmap(np.linspace(0.0, 1, n_logged_epochs, retstep=True)[0])
+    cmap_list = get_cube_helix_map(n_logged_epochs)
 
     fig, ax = plt.subplots(2, 2, figsize=(10, 8))
 
@@ -168,132 +177,9 @@ def plot_merging_stat_subplots(
     return fig
 
 
-def get_dials_merging_stats(
-    tbl: pd.DataFrame,
-    keys: tuple[str, ...] = (
-        "resolution",
-        "n_refls",
-        "n_unique",
-        "multiplicity",
-        "completeness",
-        "mean_i",
-        "meani_sigi",
-        "rmerge",
-        "rmeas",
-        "rpim",
-        "ranom",
-        "cchalf",
-        "ccanom",
-    ),
-) -> pl.DataFrame:
-    if len(keys) != len(tbl.columns):
-        raise ValueError("keys must match number of columns")
-
-    data = {}
-
-    for key, col in zip(keys, tbl.columns):
-        values = tbl[col].tolist()
-
-        if key == "cchalf":
-            values = [float(str(v).strip("*")) for v in values]
-
-        if key == "ccanom":
-            values = [float(str(v).strip("*")) for v in values]
-
-        data[key] = values
-
-    df = pl.DataFrame(data)
-
-    return df
-
-
-def _get_peak_csvs(
-    wandb_log: Path,
-) -> list:
-    log_dir = wandb_log / "predictions/"
-    peaks = log_dir.glob("**/peaks.csv")
-    return list(peaks)
-
-
-def _get_dials_htmls(
-    wandb_log: Path,
-) -> list:
-    log_dir = wandb_log / "predictions/"
-    htmls = log_dir.glob("**/merged.html")
-    return list(htmls)
-
-
-def _get_reference_data_path(run_config: dict) -> Path:
-    cfg = load_config(run_config["config"])
-    return Path(cfg["global_vars"]["data_dir"]).parent
-
-
-def _get_reference_metadata(run_config: dict) -> dict:
-    cfg = load_config(run_config["config"])
-    out = {
-        "qbg_name": cfg["surrogates"]["qbg"]["name"],
-        "qi_name": cfg["surrogates"]["qi"]["name"],
-        "max_epochs": cfg["trainer"]["max_epochs"],
-        "integrator_name": cfg["integrator"]["name"],
-        "pbg": cfg["loss"]["args"].get("pbg_cfg"),
-        "pi": cfg["loss"]["args"].get("pi_cfg"),
-        "pprf": cfg["loss"]["args"].get("pprf_cfg"),
-    }
-    return out
-
-
-def _get_reference_data(ref_data_path: Path) -> tuple[Path, ...]:
-    ref_peaks = list(ref_data_path.glob("reference_data/*peaks.csv"))[0]
-    ref_merged_html = list(ref_data_path.glob("reference_data/*merged*.html"))[0]
-    return ref_peaks, ref_merged_html
-
-
-def _peaks_as_polars(peak_csv: Path):
-    df = pl.read_csv(
-        peak_csv,
-        columns=[
-            "seqid",
-            "residue",
-            "peakz",
-        ],
-        schema_overrides={
-            "seqid": pl.Int64,
-            "residue": pl.String,
-            "peakz": pl.Float64,
-        },
-    ).sort("seqid")
-    return df
-
-
 def get_global_bins(fano_df, bin_label_key):
     bins = fano_df.select(["bin_id", bin_label_key]).unique().sort("bin_id")
     return bins["bin_id"].to_list(), bins[bin_label_key].to_list()
-
-
-def _get_bins(
-    edges: list,
-) -> tuple[list, pl.LazyFrame]:
-    bin_labels = [f"{a} - {b}" for a, b in zip(edges[:-1], edges[1:])]
-    bin_labels.insert(0, f"<{edges[0]}")
-    bin_labels.append(f">{edges[-1]}")
-
-    reversed_labels = list(reversed(bin_labels))
-
-    base_df = pl.DataFrame(
-        {
-            "bin_labels": reversed_labels,
-            "bin_id": list(range(len(reversed_labels))),
-        },
-        schema={
-            "bin_labels": pl.Categorical,
-            "bin_id": pl.Int32,
-        },
-    ).lazy()
-
-    return bin_labels, base_df
-
-
-INTENSITY_EDGES = [0, 10, 25, 50, 100, 300, 600, 1000, 1500, 2500, 5000, 10000]
 
 
 def get_fano_intensity_lazy(scan: pl.LazyFrame, edges: list):
@@ -309,28 +195,6 @@ def get_fano_intensity_lazy(scan: pl.LazyFrame, edges: list):
         )
     )
     return base_df.join(fano_df, on="bin_labels", how="left").sort("bin_id")
-
-
-DIALS_EDGES_9B7C = [
-    0,
-    1.1,
-    1.11,
-    1.14,
-    1.16,
-    1.18,
-    1.21,
-    1.23,
-    1.27,
-    1.30,
-    1.34,
-    1.49,
-    1.56,
-    1.64,
-    1.74,
-    2.06,
-    2.36,
-    2.97,
-]
 
 
 def get_fano_lazy(scan: pl.LazyFrame, edges: list) -> pl.LazyFrame:
@@ -420,8 +284,7 @@ def plot_fano_over_epoch(
     epochs = sorted(fano_df["epoch"].unique())
     n_epochs = len(epochs)
 
-    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
-    colors = cmap(np.linspace(0, 1, n_epochs))
+    colors = get_cube_helix_map(n_epochs)
 
     fig, ax = plt.subplots(figsize=(8, 4))
 
@@ -454,22 +317,18 @@ def main():
     # loading config file
     run_dir = Path(args.run_dir)
 
-    run_metadata = list(run_dir.glob("run_metadata.yaml"))[0]
-    config = load_config(run_metadata)
+    config, wandb_log = open_run(run_dir)
 
     # Reference data
     # reference_data path
     ref_data_path = _get_reference_data_path(config)
     ref_peak, ref_merged_html = _get_reference_data(ref_data_path)
-    ref_peak_df = _peaks_as_polars(ref_peak)
+    ref_peak_df = read_peaks_csv(ref_peak)
     ref_tbl1, ref_tbl2 = pd.read_html(ref_merged_html)
-    ref_df = get_dials_merging_stats(ref_tbl2)
+    ref_df = parse_dials_merging_stats(ref_tbl2).collect()
 
     # model metadata
     model_meta = _get_reference_metadata(config)
-
-    # w&b log-dir
-    wandb_log = Path(config["wandb"]["log_dir"]).parent
 
     # directory to save images
     if args.save_dir is not None:
@@ -480,27 +339,19 @@ def main():
     save_dir.mkdir(exist_ok=True)
 
     # Getting data files
-    peaks = _get_peak_csvs(wandb_log)
-    htmls = _get_dials_htmls(wandb_log)
+    peaks = glob_predictions(wandb_log, "peaks.csv", sort=False)
+    htmls = glob_predictions(wandb_log, "merged.html", sort=False)
 
-    pattern = re.compile(r"epoch_(\d+)")
     html_dfs = {}
     for h in htmls:
-        search = re.search(pattern, h.as_posix())
-        if search:
-            hit = search.group()
-            epoch = int(hit.split("_")[-1])
-        else:
-            raise ValueError(
-                "Incorrect filename formatting; Check your directory structure"
-            )
+        epoch = epoch_from_path(h.as_posix())
         tbl1, tbl2 = pd.read_html(h)
-        html_dfs[epoch] = get_dials_merging_stats(tbl2)
+        html_dfs[epoch] = parse_dials_merging_stats(tbl2).collect()
 
     fig = plot_merging_stat_subplots(html_dfs, ref_df)
     fig.suptitle(f"{model_meta['qi_name']} merging stats")
     plt.tight_layout()
-    fig.savefig(f"{save_dir}/{model_meta['qbg_name']}_dials_subplots.png", dpi=400)
+    save_figure(fig, f"{save_dir}/{model_meta['qbg_name']}_dials_subplots.png", dpi=400)
 
     ## Iodine Plots
     # Getting plot of iodines
@@ -510,15 +361,7 @@ def main():
     seqids = {}
 
     for n, p in enumerate(peaks):
-        peak_dfs[n] = pl.read_csv(
-            p,
-            columns=["seqid", "residue", "peakz"],
-            schema_overrides={
-                "seqid": pl.Int64,
-                "residue": pl.String,
-                "peakz": pl.Float64,
-            },
-        ).sort("seqid")
+        peak_dfs[n] = read_peaks_csv(p)
 
         for s, r in peak_dfs[n][["seqid", "residue"]].iter_rows():
             seqids[s] = r
@@ -547,22 +390,19 @@ def main():
         iod204, seqid=204, ref_peak_df=ref_peak_df, model_name=model_name
     )
     plt.tight_layout()
-    fig.savefig(f"{save_dir}/{model_name}_iod204.png")
-    plt.close(fig)
+    save_figure(fig, f"{save_dir}/{model_name}_iod204.png")
 
     fig = _plot_iodine_(
         iod205, seqid=205, ref_peak_df=ref_peak_df, model_name=model_name
     )
     plt.tight_layout()
-    fig.savefig(f"{save_dir}/{model_name}_iod205.png")
-    plt.close(fig)
+    save_figure(fig, f"{save_dir}/{model_name}_iod205.png")
 
     fig = _plot_iodine_(
         iod206, seqid=206, ref_peak_df=ref_peak_df, model_name=model_name
     )
     plt.tight_layout()
-    fig.savefig(f"{save_dir}/{model_name}_iod206.png")
-    plt.close(fig)
+    save_figure(fig, f"{save_dir}/{model_name}_iod206.png")
 
     #  PLOTTING FANO
     train_metric_files = list((wandb_log / "files/train_metrics").glob("*.parquet"))
@@ -572,8 +412,9 @@ def main():
         fano_df_res, bin_label_key="bin_id", edges=DIALS_EDGES_9B7C
     )
     plt.tight_layout()
-    plt.savefig(
-        f"{save_dir}/{model_meta['qi_name']}_avg_fano_over_epoch.bin.resolution.png"
+    save_figure(
+        fig,
+        f"{save_dir}/{model_meta['qi_name']}_avg_fano_over_epoch.bin.resolution.png",
     )
 
     # Plotting fano over intensity
@@ -581,8 +422,9 @@ def main():
         fano_df_intensity, bin_label_key="intensity_bin", edges=INTENSITY_EDGES
     )
     plt.tight_layout()
-    plt.savefig(
-        f"{save_dir}/{model_meta['qi_name']}_avg_fano_over_epoch.bin.intensity.png"
+    save_figure(
+        fig,
+        f"{save_dir}/{model_meta['qi_name']}_avg_fano_over_epoch.bin.intensity.png",
     )
 
 

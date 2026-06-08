@@ -4,7 +4,7 @@ from pathlib import Path
 import h5py
 import torch
 
-from refltorch.io import load_config
+from refltorch.io import open_run
 
 
 def parse_args():
@@ -18,13 +18,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # loading config file
+    # loading config file and resolving w&b log-dir
     run_dir = Path(args.run_dir)
-    run_metadata = list(run_dir.glob("run_metadata.yaml"))[0]
-    config = load_config(run_metadata)
-
-    # w&b log-dir
-    wandb_log = Path(config["wandb"]["log_dir"]).parent
+    config, wandb_log = open_run(run_dir)
 
     # getting h5 files for each epoch
 
@@ -99,6 +95,34 @@ def main():
 def _get_h5_files(wandb_log):
     pass
 
+
+import polars as pl
+
+with h5py.File(h5file, "r") as f:
+    # dials data
+    i_prf_value = f["intensity.prf.value"][:]
+    i_prf_var = f["intensity.prf.variance"][:]
+    bg_mean = f["background.mean"][:]
+    # model data
+    qi_mean = f["qi_mean"][:]
+    qi_var = f["qi_var"][:]
+    # metadata
+    refl_ids = f["refl_ids"][:]
+    epoch = f["epoch"][:]  # EAGER read into memory
+
+    df = pl.DataFrame(
+        {
+            "epoch": epoch,
+            "refl_ids": refl_ids,
+            "intensity.prf.value": i_prf_value,
+            "intensity.prf.variance": i_prf_value,
+            "background.mean": bg_mean,
+            "qi_mean": qi_mean,
+            "qi_var": qi_var,
+        }
+    )
+
+lf = df.lazy()  # now safely lazy
 
 if __name__ == "__main__":
     main()
