@@ -7,91 +7,69 @@
 #   refinement_values_final_run_*.png                 — R-work/R-free over epochs
 #
 # Requires: W&B run directories, DIALS merged.html, PHENIX refine*.log
+#
+# Models to compare can be given either with --run-dirs (quick path; labels
+# default to "<qi_name>_<run_id>") or with a --config YAML:
+#
+#   save_dir: /path/to/out          # optional
+#   seqids: [204, 205, 206]         # optional
+#   models:
+#     - run_dir: /abs/run-A
+#       label: "Gamma (global)"     # optional legend label
+#       name: gammaA                # optional model-name override
+#     - run_dir: /abs/run-B
+#       label: "Gamma (per-bin)"
 
 import argparse
 import logging
-import re
 from collections.abc import Iterable
 from pathlib import Path
 
 import matplotlib as mpl
+
 mpl.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import polars as pl
 import seaborn as sns
 import wandb
+from out_utils import DIALS_EDGES_9B7C, INTENSITY_EDGES, add_run_epoch_cols
 
 from refltorch.cli.utils import setup_logging
-from refltorch.io import load_config
+from refltorch.io import epoch_from_path, load_config, open_run
+from refltorch.plots import save_figure as _savefig
 from refltorch.plots import setup_mpl_config
+from refltorch.plots._shared import (
+    get_bins as _get_bins,
+)
+from refltorch.plots._shared import (
+    get_palette as _get_palette,
+)
+from refltorch.plots._shared import set_mpl_fonts
+from refltorch.plots.correlation_plots import plot_correlation_vs_bin
+from refltorch.plots.loss_plots import plot_loss_gap, plot_train_val_metric
+from refltorch.plots.merging_stats import plot_stat_vs_resolution
+from refltorch.plots.metric_plots import (
+    plot_binned_metric,
+    plot_binned_metric_by_epoch,
+    plot_metric_over_epoch,
+)
+from refltorch.plots.refinement_plots import plot_r_values
+from refltorch.plots.scatter_plots import plot_scatter_identity
+from refltorch.tools import (
+    get_reference_metadata as _get_reference_metadata,
+)
+from refltorch.tools import parse_dials_merging_stats, parse_phenix_r_values
 
 logger = logging.getLogger(__name__)
 
 # Setup mpl config for consistent plotting
 setup_mpl_config()
 
-
-def set_mpl_fonts(base_pt):
-    import matplotlib as mpl
-
-    mpl.rcParams.update(
-        {
-            "font.size": base_pt,
-            "axes.labelsize": base_pt,
-            "xtick.labelsize": base_pt - 1,
-            "ytick.labelsize": base_pt - 1,
-            "legend.fontsize": base_pt - 1,
-            "axes.titlesize": base_pt + 1,
-        }
-    )
-
-
 sns.set_theme(
     context="paper",  # correct for LaTeX
     style="ticks",
-    font_scale=1.0,  # IMPORTANT: don’t rescale fonts
+    font_scale=1.0,  # IMPORTANT: don't rescale fonts
 )
-
-COLORS = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e"]
-
-CATEGORICAL_HEX_COLORS = {}
-for k, v in enumerate(COLORS):
-    key = k + 1
-    CATEGORICAL_HEX_COLORS[key] = COLORS[:key]
-
-
-def _get_palette(ids) -> dict:
-    if len(ids) in CATEGORICAL_HEX_COLORS:
-        hex_colors = CATEGORICAL_HEX_COLORS[len(ids)]
-        return dict(zip(ids, hex_colors))
-    else:
-        c_pallete = sns.color_palette("Dark2")
-        return {run_id: c for run_id, c in zip(ids, c_pallete)}
-
-
-def set_figsize(
-    fraction=0.6,
-    ratio=0.6,
-    textwidth_pt=452.9679,
-    paper="a4",
-):
-    # article, 1in margins
-    if textwidth_pt is None:
-        if paper.lower() == "a4":
-            textwidth_pt = 452.97  # ~6.26 in
-        elif paper.lower() == "letter":
-            textwidth_pt = 468.0  #  ~6.48 in
-        else:
-            raise ValueError(f"Unknown paper type: {paper}")
-
-    inches_per_pt = 1.0 / 72.27
-
-    fig_width = textwidth_pt * inches_per_pt * fraction
-    fig_height = fig_width * ratio
-
-    return fig_width, fig_height
 
 
 def parse_args():
@@ -100,9 +78,15 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to a YAML config listing models to compare (see file header)",
+    )
+    parser.add_argument(
         "--run-dirs",
         nargs="+",
-        help="List of paths to the run-directories",
+        help="List of paths to the run-directories (alternative to --config)",
     )
     parser.add_argument(
         "--seqids",
@@ -126,118 +110,44 @@ def parse_args():
     return parser.parse_args()
 
 
-def plot_fano_over_epoch(
-    fano_df,
-    bin_label_key: str,
-    edges: list,
-):
-    # Global bin order
-    _, base_df = _get_bins(edges)
-    base_df = base_df.collect()
-    x_bins, x_labels = base_df["bin_id"].to_list(), base_df["bin_labels"].to_list()
-    x_bins = np.array(x_bins)
+def _resolve_models(args) -> tuple[list[dict], str | None, list]:
+    """Resolve the models to compare from --config or --run-dirs.
 
-    epochs = sorted(fano_df["epoch"].unique())
-    n_epochs = len(epochs)
+    Each returned model spec is a dict with `run_dir` and optional `label`
+    (legend text) and `name` (model-name override). Exactly one of --config
+    or --run-dirs must be given.
 
-    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
-    colors = cmap(np.linspace(0, 1, n_epochs))
+    Args:
+        args: Parsed CLI arguments.
 
-    fig, ax = plt.subplots(figsize=set_figsize())
+    Returns:
+        Tuple of (models, save_dir, seqids).
+    """
+    if args.config is not None:
+        if args.run_dirs is not None:
+            raise ValueError("Pass either --config or --run-dirs, not both")
+        cfg = load_config(args.config)
+        if "models" not in cfg or not cfg["models"]:
+            raise ValueError("config must contain a non-empty `models` list")
+        models = []
+        for entry in cfg["models"]:
+            if "run_dir" not in entry:
+                raise ValueError("each model entry must have a `run_dir`")
+            models.append(
+                {
+                    "run_dir": entry["run_dir"],
+                    "label": entry.get("label"),
+                    "name": entry.get("name"),
+                }
+            )
+        save_dir = cfg.get("save_dir")
+        seqids = cfg.get("seqids", [204, 205, 206])
+        return models, save_dir, seqids
 
-    for e, c in zip(epochs, colors):
-        data = fano_df.filter(pl.col("epoch") == e)
-
-        ax.plot(
-            x_bins,
-            data["fano"],
-            color=c,
-            alpha=0.8,
-        )
-
-    # Set ticks ONCE using global bins
-    ax.set_xticks(x_bins)
-    ax.set_xticklabels(x_labels, rotation=45, ha="right")
-
-    ax.set_yscale("log")
-    ax.set_ylabel("Fano factor")
-    ax.set_xlabel("Resolution bin (Intensity value)")
-    ax.set_title("Mean Fano over resolution and epoch")
-    ax.grid()
-
-    return fig
-
-
-def _get_bins(
-    edges: list,
-) -> tuple[list, pl.LazyFrame]:
-    bin_labels = [f"{a} - {b}" for a, b in zip(edges[:-1], edges[1:])]
-    bin_labels.insert(0, f"<{edges[0]}")
-    bin_labels.append(f">{edges[-1]}")
-
-    reversed_labels = list(reversed(bin_labels))
-
-    base_df = pl.DataFrame(
-        {
-            "bin_labels": reversed_labels,
-            "bin_id": list(range(len(reversed_labels))),
-        },
-        schema={
-            "bin_labels": pl.Categorical,
-            "bin_id": pl.Int32,
-        },
-    ).lazy()
-
-    return bin_labels, base_df
-
-
-# FIX:
-# Come up with a method to generate intensity and resolution edges
-# In the case of dials, we can perhaps just get them from the reference data
-# Let's try to do so
-
-INTENSITY_EDGES = [0, 10, 25, 50, 100, 300, 600, 1000, 1500, 2500, 5000, 10000]
-DIALS_EDGES_9B7C = [
-    0,
-    1.1,
-    1.11,
-    1.14,
-    1.16,
-    1.18,
-    1.21,
-    1.23,
-    1.27,
-    1.30,
-    1.34,
-    1.49,
-    1.56,
-    1.64,
-    1.74,
-    2.06,
-    2.36,
-    2.97,
-]
-
-
-def _get_reference_metadata(run_config: dict) -> dict:
-    cfg = load_config(run_config["config"])
-    loss_args = cfg["loss"]["args"]
-    out = {
-        "qbg_name": cfg["surrogates"]["qbg"]["name"],
-        "qi_name": cfg["surrogates"]["qi"]["name"],
-        "max_epochs": cfg["trainer"]["max_epochs"],
-        "integrator_name": cfg["integrator"]["name"],
-        "pbg": loss_args.get("pbg_cfg"),
-        "pi": loss_args.get("pi_cfg"),
-        "pprf": loss_args.get("pprf_cfg"),
-    }
-    return out
-
-
-def _get_reference_data(ref_data_path: Path) -> tuple[Path, ...]:
-    ref_peaks = list(ref_data_path.glob("reference_data/*peaks.csv"))[0]
-    ref_merged_html = list(ref_data_path.glob("reference_data/*merged*.html"))[0]
-    return ref_peaks, ref_merged_html
+    if not args.run_dirs:
+        raise ValueError("Provide either --config or --run-dirs")
+    models = [{"run_dir": rd, "label": None, "name": None} for rd in args.run_dirs]
+    return models, args.save_dir, args.seqids
 
 
 def _get_reference_paths(run_dirs) -> dict[str, Path]:
@@ -249,11 +159,6 @@ def _get_reference_paths(run_dirs) -> dict[str, Path]:
     cfg = load_config(run_cfg["config"])
     output_cfg = cfg["output"]
     return {k: Path(v) for k, v in output_cfg.items()}
-
-
-def _get_reference_data_path(run_config: dict) -> Path:
-    cfg = load_config(run_config["config"])
-    return Path(cfg["global_vars"]["data_dir"]).parent
 
 
 def _plot_metric(
@@ -268,45 +173,21 @@ def _plot_metric(
     y_key: str = "mean_qi_var",
     y_scale: bool | None = None,
 ):
-    # plotting the mean qi_var per model
-
-    fig, ax = plt.subplots(figsize=set_figsize(ratio=0.6, textwidth_pt=452.9679))
-    labels = base_df["bin_labels"].to_list()
-    ticks = base_df["bin_id"].to_list()
-
-    palette = _get_palette(run_ids)
-
-    for r in run_ids:
-        df_ = df_map[r]
-
-        df = base_df.join(df_, on="bin_labels", how="left").sort("bin_id")
-
-        # plot
-        model_name = run_data[r]["model_metadata"]["qi_name"]
-        ax.plot(
-            df[x_key],
-            df[y_key],
-            label=f"{model_name}_{r}",
-            color=palette[r],
-        )
-
-    ax.set_xlabel(x_label)
-    ax.set_xticks(ticks)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_ylabel(y_label)
-
-    labels = ax.get_xticklabels()
-    for i, label in enumerate(labels):
-        if i % 2 != 0:
-            label.set_visible(False)
-
-    ax.set_title(title)
-    if y_scale is not None:
-        ax.set_yscale("log")
-    ax.legend()
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-    ax.grid()
-    return fig, ax
+    # plotting one binned metric line per model
+    run_ids = list(run_ids)
+    labels = {r: run_data[r]["label"] for r in run_ids}
+    return plot_binned_metric(
+        df_map,
+        base_df,
+        series_ids=run_ids,
+        labels=labels,
+        x_key=x_key,
+        y_key=y_key,
+        x_label=x_label,
+        y_label=y_label,
+        title=title,
+        y_log=y_scale is not None,
+    )
 
 
 def _plot_per_epoch_metric(
@@ -321,39 +202,19 @@ def _plot_per_epoch_metric(
     x_key: str = "bin_id",
     y_key: str = "mean_qi_var",
 ):
-    # plotting the mean qi_var per model
-
-    n_epochs = len(epochs)
-    cmap = sns.cubehelix_palette(start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True)
-    colors = cmap(np.linspace(0, 1, n_epochs))
-
-    fig, ax = plt.subplots(figsize=set_figsize())
-
-    for c, e in zip(colors, epochs):
-        df_ = df.filter(pl.col("epoch") == e)
-        df_ = base_df.join(df_, on="bin_labels", how="left").sort("bin_id")
-
-        ax.plot(
-            df_[x_key],
-            df_[y_key],
-            c=c,
-        )
-    ax.grid()
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
-    ax.set_title(title)
-    if y_scale is not None:
-        ax.set_yscale(y_scale)
-    fig.savefig(
-        fname,
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
+    # one binned metric line per epoch, saved to fname
+    fig, _ = plot_binned_metric_by_epoch(
+        df,
+        base_df,
+        epochs=epochs,
+        x_key=x_key,
+        y_key=y_key,
+        x_label=x_label,
+        y_label=y_label,
+        title=title,
+        y_log=y_scale is not None,
     )
-
-    plt.close(fig)
+    _savefig(fig, fname)
 
 
 def _get_df_map(
@@ -404,6 +265,7 @@ def _plot_anomalous_metric(
     metric: str,
 ):
     # set up reference data if provided
+    ref_value = None
     if reference_data is not None:
         reference_data = reference_data.filter(pl.col("seqid").is_in([204, 205, 206]))
         ref_lf = reference_data.select(
@@ -413,25 +275,24 @@ def _plot_anomalous_metric(
             min_signal=pl.col("peakz").min(),
             median_signal=pl.col("peakz").median(),
         ).collect()
+        ref_value = ref_lf[metric].item()
 
-    fig, ax = plt.subplots(figsize=set_figsize())
     palette = _get_palette(run_ids)
+    series = []
     for r in run_ids:
-        model_name = run_data[r]["model_metadata"]["qi_name"]
-        label = f"{model_name}_{r}"
-        lf = peak_lf.filter(pl.col("run_id") == r)
-        df = lf.collect()
+        label = run_data[r]["label"]
+        df = peak_lf.filter(pl.col("run_id") == r).collect()
         df = epoch_df.join(df, on="epoch", how="left").sort("epoch")
-        ax.plot(df["epoch"], df[metric], label=label, color=palette[r])
-    if reference_data is not None:
-        ax.axhline(ref_lf[metric].item(), c="red", label="DIALS")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel(f"{metric}")
-    ax.set_title(f"{metric} over epochs")
-    ax.legend()
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-    ax.grid()
-    return fig, ax
+        series.append((label, df["epoch"], df[metric], palette[r]))
+
+    return plot_metric_over_epoch(
+        series,
+        ref_value=ref_value,
+        ref_label="DIALS",
+        x_label="epoch",
+        y_label=f"{metric}",
+        title=f"{metric} over epochs",
+    )
 
 
 def _get_val_loss(wb_data):
@@ -448,90 +309,7 @@ def _get_train_loss(wb_data):
     return df.drop_nulls()
 
 
-def get_dials_merging_stats(
-    tbl: pd.DataFrame,
-    epoch: int | None = None,
-    run_id: str | None = None,
-    model_name: str | None = None,
-    keys: tuple[str, ...] = (
-        "resolution",
-        "n_refls",
-        "n_unique",
-        "multiplicity",
-        "completeness",
-        "mean_i",
-        "meani_sigi",
-        "rmerge",
-        "rmeas",
-        "rpim",
-        "ranom",
-        "cchalf",
-        "ccanom",
-    ),
-) -> pl.LazyFrame:
-    if len(keys) != len(tbl.columns):
-        raise ValueError("keys must match number of columns")
-
-    data = {}
-
-    for key, col in zip(keys, tbl.columns):
-        values = tbl[col].tolist()
-
-        if key == "cchalf":
-            values = [float(str(v).strip("*")) for v in values]
-
-        if key == "ccanom":
-            values = [float(str(v).strip("*")) for v in values]
-
-        data[key] = values
-
-    # df = pl.LazyFrame(data).with_columns(epoch=epoch, run_id=run_id)
-    lf = pl.LazyFrame(data)
-
-    if epoch is not None:
-        lf = lf.with_columns(epoch=pl.lit(epoch))
-    if run_id is not None:
-        lf = lf.with_columns(run_id=pl.lit(run_id))
-    if model_name is not None:
-        lf = lf.with_columns(model_name=pl.lit(model_name))
-
-    return lf
-
-
-def _get_r_vals(phenix_log: Path):
-    pattern1 = re.compile(r"Start R-work")
-    pattern2 = re.compile(r"Final R-work")
-    matches = {}
-
-    with phenix_log.open("r") as file:
-        lines = file.readlines()
-        matched_lines_start = [line.strip() for line in lines if pattern1.search(line)]
-        matched_lines_final = [line.strip() for line in lines if pattern2.search(line)]
-
-        matches["r_work_start"] = float(
-            re.findall(r"\d\.\d+", matched_lines_start[0])[0]
-        )
-        matches["r_free_start"] = float(
-            re.findall(r"\d\.\d+", matched_lines_start[0])[1]
-        )
-
-        matches["r_work_final"] = float(
-            re.findall(r"\d\.\d+", matched_lines_final[0])[0]
-        )
-        matches["r_free_final"] = float(
-            re.findall(r"\d\.\d+", matched_lines_final[0])[1]
-        )
-    return matches
-
-
 def _get_anomalous_peak_paths(reference_paths, run_data):
-    ref_peak_lf = None
-    check_phenix_logs = reference_paths.get(
-        "anomalous_peaks", ValueError("key not in reference_paths: anomalous_peaks")
-    )
-    if check_phenix_logs is not None:
-        ref_peak_lf = pl.scan_csv(reference_paths["anomalous_peaks"])
-
     # MODEL anomalous peak heights
     all_peaks = [csv for run in run_data.values() for csv in run.get("peak.csv", [])]
     return all_peaks
@@ -540,13 +318,10 @@ def _get_anomalous_peak_paths(reference_paths, run_data):
 def _get_reference_merging_stats(reference_paths):
     # Getting reference DIALS merged.html
     ref_merge_stats_df = None
-    check_merged_html = reference_paths.get(
-        "dials_merge_html", ValueError("key not in reference_paths: dials_merge_html")
-    )
-    if check_merged_html is not None:
+    if reference_paths.get("dials_merge_html") is not None:
         # Getting reference merging statistics
         ref_tbl1, ref_tbl2 = pd.read_html(reference_paths["dials_merge_html"])
-        ref_merge_stats_df = get_dials_merging_stats(ref_tbl2).collect()
+        ref_merge_stats_df = parse_dials_merging_stats(ref_tbl2).collect()
 
     return ref_merge_stats_df
 
@@ -570,16 +345,8 @@ def _get_peak_lf(
         },
     )
 
-    # Extracting epoch from filename and appending as column
-    lf = lf.with_columns(
-        [
-            pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1).alias("run_id"),
-            pl.col("filenames")
-            .str.extract(r"/epoch_(\d+)/", 1)
-            .cast(pl.Int32)  # optional
-            .alias("epoch"),
-        ]
-    )
+    # Extracting run_id and epoch from filename and appending as columns
+    lf = add_run_epoch_cols(lf)
     return lf
 
 
@@ -588,29 +355,22 @@ def _get_merging_stat_df(
 ) -> pl.DataFrame:
     # NOTE:
     # Plot merging statistics from DIALS html files
-    pattern = re.compile(r"epoch_(\d+)")
     merging_stat_dfs = []
     for run in run_data.values():
         htmls = run["merged.html"]
         model_name = run["model_name"]
         run_id = run["run_id"]
+        label = run["label"]
         for h in htmls:
-            search = re.search(pattern, h.as_posix())
-            if search:
-                hit = search.group()
-                epoch = int(hit.split("_")[-1])
-            else:
-                raise ValueError(
-                    "Incorrect filename formatting; Check your directory structure"
-                )
+            epoch = epoch_from_path(h)
             tbl1, tbl2 = pd.read_html(h)
             merging_stat_dfs.append(
-                get_dials_merging_stats(
-                    tbl=tbl2,
+                parse_dials_merging_stats(
+                    tbl2,
                     epoch=epoch,
                     run_id=run_id,
                     model_name=model_name,
-                )
+                ).with_columns(label=pl.lit(label))
             )
 
     merging_stat_df = pl.concat(merging_stat_dfs).collect()
@@ -623,187 +383,34 @@ def _plot_merging_stats(
     ref_merge_stats_df,
     save_dir: Path,
 ):
-    im_frac = 0.6
-    out_dir = save_dir
-    out_dir.mkdir(exist_ok=True)
+    save_dir.mkdir(exist_ok=True)
+
+    # (y_key, ylabel, yticks, filename tag)
+    specs = [
+        ("cchalf", "CChalf", [0.0, 0.25, 0.5, 0.75, 1.0], "cchalf"),
+        ("rpim", "Rpim", [0.0, 0.25, 0.5, 0.75, 1.0], "rpim"),
+        ("meani_sigi", "I/Sig(I)", [0.0, 25, 50, 75, 100, 125], "isigi"),
+        ("ccanom", "CCanom", [-0.5, -0.25, 0.0, 0.25], "ccanom"),
+    ]
 
     for run in run_ids:
         df_ = merging_stat_df.filter(pl.col("run_id") == run)
-
         model_name = df_["model_name"].unique().item()
-        run_id = df_["run_id"].unique().item()
+        label = df_["label"].unique().item()
 
-        # colorbar
-        cmap = sns.cubehelix_palette(
-            start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True
-        )
-        norm = mpl.colors.Normalize(
-            vmin=df_["epoch"].min(),
-            vmax=df_["epoch"].max(),
-        )
-        sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-
-        # cchalf plot
-        # setting up figure
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
-
-        sns.lineplot(
-            data=df_,
-            x="resolution",
-            y="cchalf",
-            hue="epoch",
-            palette=cmap,
-            hue_norm=norm,
-            legend=False,
-            ax=ax,
-        )
-        ax.plot(ref_merge_stats_df["cchalf"], label="DIALS", color="red")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-        ax.set_xlabel("Resolution bin")
-        ax.set_ylabel("CChalf")
-        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-        ax.legend()
-        ax.grid(alpha=0.5)
-        ax.set_title(f"{model_name}")
-
-        fig.savefig(
-            f"{out_dir}/merging_stats.cchalf.run_{run}.model_{model_name}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-        plt.close(fig)
-
-        # rpim plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
-
-        sns.lineplot(
-            data=df_,
-            x="resolution",
-            y="rpim",
-            hue="epoch",
-            palette=cmap,
-            hue_norm=norm,
-            legend=False,
-            ax=ax,
-        )
-        ax.plot(ref_merge_stats_df["rpim"], label="DIALS", color="red")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-        ax.set_xlabel("Resolution bin")
-        ax.set_ylabel("Rpim")
-        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-        ax.grid(alpha=0.5)
-        ax.set_title(f"{model_name}")
-
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-        ax.legend()
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        fig.savefig(
-            f"{out_dir}/merging_stats.rpim.run_{run}.model_{model_name}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
-
-        # isigi plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
-
-        sns.lineplot(
-            data=df_,
-            x="resolution",
-            y="meani_sigi",
-            hue="epoch",
-            palette=cmap,
-            hue_norm=norm,
-            legend=False,
-            ax=ax,
-        )
-        ax.plot(ref_merge_stats_df["meani_sigi"], label="DIALS", color="red")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-        ax.set_xlabel("Resolution bin")
-        ax.set_ylabel("I/Sig(I)")
-        ax.set_title(f"{model_name}")
-        ax.grid(alpha=0.5)
-        ax.set_yticks([0.0, 25, 50, 75, 100, 125])
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-        ax.legend()
-
-        fig.savefig(
-            f"{out_dir}/merging_stats.isigi.run_{run}.model_{model_name}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-        plt.close(fig)
-
-        # ccanom plot
-        fig, ax = plt.subplots(figsize=set_figsize(fraction=im_frac))
-
-        sns.lineplot(
-            data=df_,
-            x="resolution",
-            y="ccanom",
-            hue="epoch",
-            palette=cmap,
-            hue_norm=norm,
-            legend=False,
-            ax=ax,
-        )
-        ax.plot(ref_merge_stats_df["ccanom"], label="DIALS", color="red")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-        ax.set_xlabel("Resolution bin")
-        ax.set_ylabel("CCanom")
-        ax.set_title(f"{model_name}")
-        ax.set_yticks([-0.5, -0.25, 0.0, 0.25])
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-        ax.legend()
-        ax.grid(alpha=0.5)
-        fig.savefig(
-            f"{out_dir}/merging_stats.ccanom.run_{run}.model_{model_name}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-        plt.close(fig)
+        for y_key, ylabel, yticks, tag in specs:
+            fig, _ = plot_stat_vs_resolution(
+                df_,
+                y_key=y_key,
+                ref=ref_merge_stats_df[y_key],
+                ylabel=ylabel,
+                yticks=yticks,
+                title=label,
+            )
+            _savefig(
+                fig,
+                f"{save_dir}/merging_stats.{tag}.run_{run}.model_{model_name}.png",
+            )
 
 
 def _get_corr_df(pred_lf):
@@ -830,119 +437,14 @@ def _plot_correlations(
     corr_df,
     save_dir: Path,
 ):
+    corr_keys = ["corr_I", "corr_bg", "corr_var_I"]
     for (run,), df_run in corr_df.group_by("run_id"):
         out_dir = save_dir / f"{run}"
         out_dir.mkdir(exist_ok=True)
 
-        # Plotting intensity correlation
-        cmap = sns.cubehelix_palette(
-            start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True
-        )
-        norm = mpl.colors.Normalize(
-            vmin=df_run["epoch"].min(),
-            vmax=df_run["epoch"].max(),
-        )
-        sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-
-        fig, ax = plt.subplots(figsize=set_figsize())
-        sns.lineplot(
-            data=df_run,
-            x="d_bins",
-            y="corr_I",
-            hue="epoch",
-            hue_norm=norm,
-            palette=cmap,
-            legend=False,
-        )
-
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
-        ax.grid()
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        fig.savefig(
-            f"{out_dir}/run_{run}_dials_corr_I.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
-
-        # Plotting background correlation
-
-        fig, ax = plt.subplots(figsize=set_figsize())
-        sns.lineplot(
-            data=df_run,
-            x="d_bins",
-            y="corr_bg",
-            hue="epoch",
-            hue_norm=norm,
-            palette=cmap,
-            legend=False,
-        )
-
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
-        ax.grid()
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        fig.savefig(
-            f"{out_dir}/run_{run}_dials_corr_bg.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
-
-        # Plotting var(I) correlation
-        fig, ax = plt.subplots(figsize=set_figsize())
-        sns.lineplot(
-            data=df_run,
-            x="d_bins",
-            y="corr_var_I",
-            hue="epoch",
-            hue_norm=norm,
-            palette=cmap,
-            legend=False,
-        )
-
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=50)
-        ax.grid()
-        cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Epoch", rotation=90)
-
-        labels = ax.get_xticklabels()
-        for i, label in enumerate(labels):
-            if i % 2 != 0:
-                label.set_visible(False)
-
-        fig.savefig(
-            f"{out_dir}/run_{run}_dials_corr_var_I.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
+        for y_key in corr_keys:
+            fig, _ = plot_correlation_vs_bin(df_run, y_key=y_key)
+            _savefig(fig, f"{out_dir}/run_{run}_dials_{y_key}.png")
 
 
 def _get_rval_df(
@@ -950,19 +452,17 @@ def _get_rval_df(
     run_data,
 ) -> pl.DataFrame:
     dfs = []
-    pattern = re.compile(r"epoch_(\d+)")
     for run in run_ids:
         for f in run_data[run]["phenix_logs"]:
-            rvals = _get_r_vals(f)
-            s = re.search(pattern, f.as_posix())
-            if s:
-                epoch = int(s.groups()[0])
+            rvals = parse_phenix_r_values(f)
+            epoch = epoch_from_path(f)
             df = pl.DataFrame(
                 {
                     "run_id": run,
                     "epoch": epoch,
                     "fname": f.as_posix(),
                     "model_name": run_data[run]["model_name"],
+                    "label": run_data[run]["label"],
                     **rvals,
                 },
             )
@@ -985,6 +485,7 @@ def _get_rval_long_df(
             "run_id",
             "epoch",
             "model_name",
+            "label",
         ],
     )
 
@@ -1002,7 +503,7 @@ def _get_rval_long_df(
         ]
     )
     long_df = long_df.with_columns(
-        Label=pl.col("model_name") + "_" + pl.col("run_id"),
+        Label=pl.col("label"),
     )
     return long_df
 
@@ -1015,30 +516,12 @@ def _get_pred_lf(
         all_preds,
         include_file_paths="filenames",
     )
-    pred_lf = pred_lf.with_columns(
-        [
-            pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1).alias("run_id"),
-            pl.col("filenames")
-            .str.extract(r"/epoch_(\d+)/", 1)
-            .cast(pl.Int32)  # optional
-            .alias("epoch"),
-        ]
-    )
+    pred_lf = add_run_epoch_cols(pred_lf)
     return pred_lf
 
 
 def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
-    # Plot hyper parameters
     pad = 2.0
-    alpha = 0.15
-    alpha2 = 0.5
-    dot_size = 3
-    figsize = (8, 8)
-
-    _save_kw = dict(
-        transparent=True, dpi=300, facecolor="white",
-        bbox_inches="tight", pad_inches=0.02,
-    )
 
     for run in run_ids:
         out_dir = save_dir / f"{run}"
@@ -1064,34 +547,29 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
             # Filter: positive DIALS variance only
             df_good = df_epoch.filter(pl.col("intensity.prf.variance") > 0)
             n_total = len(df_epoch)
-            n_good = len(df_good)
 
-            # --- All reflections (symlog) ---
+            # All reflections (symlog)
             x_max = (
                 df_epoch.select(pl.max("qi_mean", "intensity.prf.value"))
                 .max_horizontal()
                 .item()
             ) * pad
             y_min = df_epoch.select(pl.min("intensity.prf.value")).item() * pad
-
-            fig, ax = plt.subplots(figsize=figsize)
-            ax.scatter(
-                df_epoch["qi_mean"], df_epoch["intensity.prf.value"],
-                alpha=alpha, c="black", s=dot_size, edgecolors="none",
+            fig, _ = plot_scatter_identity(
+                df_epoch["qi_mean"],
+                df_epoch["intensity.prf.value"],
+                identity=(0, x_max),
+                title=f"Run {run} | Epoch {epoch}\nAll reflections (n={n_total:,})",
+                xlabel="Model Intensity",
+                ylabel="DIALS intensity.prf.value",
+                xlim=(0.0, x_max),
+                ylim=(y_min, x_max),
+                xscale="symlog",
+                yscale="symlog",
             )
-            ax.plot([0, x_max], [0, x_max], c="red", alpha=alpha2)
-            ax.set_title(f"Run {run} | Epoch {epoch}\nAll reflections (n={n_total:,})")
-            ax.set_xlabel("Model Intensity")
-            ax.set_ylabel("DIALS intensity.prf.value")
-            ax.set_xlim(xmin=0.0, xmax=x_max)
-            ax.set_ylim(ymin=y_min, ymax=x_max)
-            ax.set_yscale("symlog")
-            ax.set_xscale("symlog")
-            ax.grid(True, alpha=0.3)
-            fig.savefig(f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png", **_save_kw)
-            plt.close(fig)
+            _savefig(fig, f"{out_dir}/run_{run}_vs_dials_I_{epoch}.png")
 
-            # --- Filtered: positive variance only (log-log) ---
+            # Filtered: positive variance only (log-log)
             df_pos = df_good.filter(
                 (pl.col("qi_mean") > 0) & (pl.col("intensity.prf.value") > 0)
             )
@@ -1101,80 +579,64 @@ def _plot_run_merging_stats(run_ids, pred_lf, save_dir: Path):
                     .max_horizontal()
                     .item()
                 ) * pad
+                fig, _ = plot_scatter_identity(
+                    df_pos["qi_mean"],
+                    df_pos["intensity.prf.value"],
+                    identity=(1e-1, x_max_f),
+                    title=(
+                        f"Run {run} | Epoch {epoch}\n"
+                        f"Filtered: var>0 & I>0 (n={len(df_pos):,} / {n_total:,})"
+                    ),
+                    xlabel="Model Intensity",
+                    ylabel="DIALS intensity.prf.value",
+                    xscale="log",
+                    yscale="log",
+                )
+                _savefig(fig, f"{out_dir}/run_{run}_vs_dials_I_filtered_{epoch}.png")
 
-                fig, ax = plt.subplots(figsize=figsize)
-                ax.scatter(
-                    df_pos["qi_mean"], df_pos["intensity.prf.value"],
-                    alpha=alpha, c="black", s=dot_size, edgecolors="none",
-                )
-                ax.plot([1e-1, x_max_f], [1e-1, x_max_f], c="red", alpha=alpha2)
-                ax.set_title(
-                    f"Run {run} | Epoch {epoch}\n"
-                    f"Filtered: var>0 & I>0 (n={len(df_pos):,} / {n_total:,})"
-                )
-                ax.set_xlabel("Model Intensity")
-                ax.set_ylabel("DIALS intensity.prf.value")
-                ax.set_xscale("log")
-                ax.set_yscale("log")
-                ax.grid(True, alpha=0.3)
-                fig.savefig(
-                    f"{out_dir}/run_{run}_vs_dials_I_filtered_{epoch}.png", **_save_kw
-                )
-                plt.close(fig)
-
-            # --- Background ---
+            # Background
             bg_model_key = "qbg_mean"
             bg_dials_key = "background.mean"
-
             x_max = (
                 df_epoch.select(pl.max(bg_model_key, bg_dials_key))
                 .max_horizontal()
                 .item()
             )
             y_min = df_epoch.select(pl.min(bg_dials_key)).item()
-
-            fig, ax = plt.subplots(figsize=figsize)
-            ax.scatter(
-                df_epoch[bg_model_key], df_epoch[bg_dials_key],
-                alpha=alpha, c="black", s=dot_size, edgecolors="none",
+            fig, _ = plot_scatter_identity(
+                df_epoch[bg_model_key],
+                df_epoch[bg_dials_key],
+                identity=(0, x_max),
+                title=f"Run {run} | Epoch {epoch}",
+                xlabel="Model bg",
+                ylabel=bg_dials_key,
+                xlim=(0.0, x_max),
+                ylim=(y_min, x_max),
             )
-            ax.plot([0, x_max], [0, x_max], c="red", alpha=alpha2)
-            ax.set_title(f"Run {run} | Epoch {epoch}")
-            ax.set_xlabel("Model bg")
-            ax.set_ylabel(bg_dials_key)
-            ax.set_xlim(xmin=0.0, xmax=x_max)
-            ax.set_ylim(ymin=y_min, ymax=x_max)
-            ax.grid(True, alpha=0.3)
-            fig.savefig(f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png", **_save_kw)
-            plt.close(fig)
+            _savefig(fig, f"{out_dir}/run_{run}_vs_dials_bg_{epoch}.png")
 
-            # --- Variance ---
+            # Variance
             df_var = df_good.filter(pl.col("qi_var") > 0)
             if len(df_var) > 0:
-                fig, ax = plt.subplots(figsize=figsize)
-                ax.scatter(
-                    df_var["qi_var"], df_var["intensity.prf.variance"],
-                    alpha=alpha, c="black", s=dot_size, edgecolors="none",
-                )
                 x_max_v = (
                     df_var.select(pl.max("qi_var", "intensity.prf.variance"))
                     .max_horizontal()
                     .item()
                 ) * pad
-                ax.plot([1e-1, x_max_v], [1e-1, x_max_v], c="red", alpha=alpha2)
-                ax.set_title(
-                    f"Run {run} | Epoch {epoch}\n"
-                    f"var>0 (n={len(df_var):,} / {n_total:,})"
+                fig, _ = plot_scatter_identity(
+                    df_var["qi_var"],
+                    df_var["intensity.prf.variance"],
+                    identity=(1e-1, x_max_v),
+                    title=(
+                        f"Run {run} | Epoch {epoch}\n"
+                        f"var>0 (n={len(df_var):,} / {n_total:,})"
+                    ),
+                    xlabel="Model var(I)",
+                    ylabel="intensity.prf.variance",
+                    xscale="log",
+                    yscale="log",
                 )
-                ax.set_xlabel("Model var(I)")
-                ax.set_ylabel("intensity.prf.variance")
-                ax.set_xscale("log")
-                ax.set_yscale("log")
-                ax.grid(True, alpha=0.3)
-                fig.savefig(
-                    f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png", **_save_kw
-                )
-                plt.close(fig)
+                _savefig(fig, f"{out_dir}/run_{run}_vs_dials_var_epoch_{epoch}.png")
 
 
 # FIX: Modify to plot the start/final rvalues as two separate plots
@@ -1184,77 +646,25 @@ def _plot_r_values(
     linewidth: int = 1,
     ref_path: Path | None = None,
 ):
-    # getting color palette
-    run_ids = long_df["run_id"].unique().to_list()
-    plot_ids = ["r_work", "r_free"]
-
+    # shared palette over all labels so colors are stable across runs
     palette = _get_palette(long_df["Label"].unique().to_list())
+    ref_vals = parse_phenix_r_values(ref_path) if ref_path is not None else None
 
-    # plot line style
-    dashes = {"r_free": (2, 1), "r_work": ""}
-
-    if ref_path is not None:
-        ref_vals = _get_r_vals(ref_path)
-
-    # iterate over grouped dataframes
     for (run,), run_df in long_df.group_by(pl.col("run_id")):
         # plot only final r-values
         run_df = run_df.filter(pl.col("stage") == "final")
+        label = run_df["Label"].unique().to_list()[0]
+        title = f"Final refinement values vs epoch\nmodel: {label}"
 
-        # title
-        title = f"Final refinement values vs epoch\nmodel: {run_df['Label'].unique().to_list()[0]}"
-
-        # out dir
-        out_dir = save_dir
-        out_dir.mkdir(exist_ok=True)
-
-        fig, ax = plt.subplots(figsize=set_figsize())
-
-        sns.lineplot(
-            data=run_df,
-            x="epoch",
-            y="value",
-            hue="Label",
-            style="Metric",
+        save_dir.mkdir(exist_ok=True)
+        fig, _ = plot_r_values(
+            run_df,
             palette=palette,
-            dashes=dashes,
+            ref_vals=ref_vals,
             linewidth=linewidth,
-            ax=ax,
+            title=title,
         )
-
-        if ref_path is not None:
-            assert isinstance(ref_vals, dict)
-            ax.axhline(
-                ref_vals["r_work_final"],
-                color="#cc0000",
-                label="DIALS rwork final",
-            )
-            ax.axhline(
-                ref_vals["r_free_final"],
-                color="#cc0000",
-                linestyle="--",
-                label="DIALS rfree final",
-            )
-
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("r value")
-        ax.set_title(title)
-        ax.grid()
-        # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-        ax.get_legend().remove()
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1, 1))
-
-        fig.savefig(
-            f"{out_dir}/refinement_values_final_run_{run}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
+        _savefig(fig, f"{save_dir}/refinement_values_final_run_{run}.png")
 
 
 def _get_loss_dfs(run_data) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -1264,7 +674,7 @@ def _get_loss_dfs(run_data) -> tuple[pl.DataFrame, pl.DataFrame]:
     for v in run_data.values():
         run_id = v["run_id"]
         model_name = v["model_name"]
-        label = f"{model_name}_{run_id}"
+        label = v["label"]
         val_loss_dfs.append(
             _get_val_loss(v["loss_df"]).with_columns(
                 run_id=pl.lit(run_id),
@@ -1293,27 +703,8 @@ def _plot_loss_gap(
     metric,
     save_dir,
 ):
-    fig, ax = plt.subplots(figsize=set_figsize())
-    sns.lineplot(
-        data=loss_gap_df,
-        x="epoch",
-        y=metric,
-        hue="label",
-        palette="Dark2",
-    )
-    ax.grid()
-    ax.legend()
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-    ax.set_title(f"Train/Val {metric} gap")
-
-    plt.savefig(
-        f"{save_dir}/train_val_{metric}.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
+    fig, _ = plot_loss_gap(loss_gap_df, metric=metric)
+    _savefig(fig, f"{save_dir}/train_val_{metric}.png")
 
 
 def _get_loss_gap_df(train_loss_df, val_loss_df) -> pl.DataFrame:
@@ -1351,14 +742,7 @@ def _plot_train_val_loss(
     long_loss_df: pl.DataFrame,
     save_dir: str | Path,
 ):
-    labels = long_loss_df["label"].unique().to_list()
-    palette = _get_palette(labels)
-
-    # plot line style
-    dashes = {
-        "val": (2, 1),
-        "train": "",
-    }
+    palette = _get_palette(long_loss_df["label"].unique().to_list())
 
     # Metrics to plot together
     metrics = {
@@ -1367,64 +751,37 @@ def _plot_train_val_loss(
         "elbo": ("train elbo", "val elbo"),
     }
 
-    for k, v in metrics.items():
-        plot_df = long_loss_df.filter(pl.col("variable").is_in(v))
-        ymin = plot_df["value"].min()
-
-        fig, ax = plt.subplots(figsize=set_figsize())
-        sns.lineplot(
-            data=plot_df,
-            x="epoch",
-            y="value",
-            hue="label",  # color by label (model_name_run_id)
-            style="Stage",  # Stage is train or val
+    for k, variables in metrics.items():
+        ymax = 2000 if k in ["nll", "elbo"] else None
+        fig, _ = plot_train_val_metric(
+            long_loss_df,
+            variables=variables,
             palette=palette,
-            dashes=dashes,
-            linewidth=2,
-            ax=ax,
+            title=f"Train/Val {k.upper()} vs epoch ",
+            ylabel=f"{k.upper()}",
+            ymax=ymax,
         )
-
-        ax.set_title(f"Train/Val {k.upper()} vs epoch ")
-        ax.grid()
-        ax.set_ylabel(f"{k.upper()}")
-
-        if k in ["nll", "elbo"]:
-            ax.set_ylim(ymax=2000)
-        ax.set_ylim(ymin=ymin)
-        sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-
-        fig.savefig(
-            f"{save_dir}/train_val_{k}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
+        _savefig(fig, f"{save_dir}/train_val_{k}.png")
 
 
-def _get_run_data(run_dirs):
+def _get_run_data(models):
     # Dictionary for model metadata
     run_data = {}
-    wandb_log = None
 
-    # Getting data paths for each run
-    for rd in run_dirs:
-        path = Path(rd)
-        run_cfg = list(path.glob("run_metadata.yaml"))[0]
-        run_cfg = load_config(run_cfg)
+    # Getting data paths for each model
+    for spec in models:
+        run_cfg, wandb_log = open_run(spec["run_dir"])
 
         # wandb metadata
         project = run_cfg["wandb"]["project"]
         run_id = run_cfg["wandb"]["run_id"]
 
         model_meta = _get_reference_metadata(run_cfg)
-        wandb_log = Path(run_cfg["wandb"]["log_dir"]).parent
+        model_name = spec.get("name") or model_meta["qi_name"]
+        label = spec.get("label") or f"{model_name}_{run_id}"
 
-        # get peak.csv paths
-        pred_dir = Path(wandb_log / "predictions/")
+        # get prediction-output paths
+        pred_dir = wandb_log / "predictions"
 
         # Getting metrics from W&B
         loss_df = wandb.Api().run(project + "/" + run_id).history()
@@ -1434,7 +791,8 @@ def _get_run_data(run_dirs):
             "run_cfg": run_cfg,
             "run_id": run_id,
             "model_metadata": model_meta,
-            "model_name": model_meta["qi_name"],
+            "model_name": model_name,
+            "label": label,
             "wandb_log_dir": wandb_log.as_posix(),
             "loss_df": loss_df,
             "merged.html": list(pred_dir.glob("**/merged.html")),
@@ -1448,13 +806,13 @@ def _get_run_data(run_dirs):
     return run_data
 
 
-def _get_save_dir(args, run_data):
+def _get_save_dir(save_dir, run_data):
     # number of runs to analyze
     n_models = len(run_data)
 
     # use user-specified save_dir if passed
-    if args.save_dir is not None:
-        save_dir = Path(args.save_dir)
+    if save_dir is not None:
+        save_dir = Path(save_dir)
         save_dir.mkdir(exist_ok=True)
 
     elif n_models > 1:
@@ -1476,20 +834,16 @@ def main():
     args = parse_args()
     setup_logging(args.verbose)
 
-    # Runs to analyze
-    run_dirs = args.run_dirs
-    logger.info(f"Run directories: {run_dirs}")
+    # Models to analyze (from --config or --run-dirs)
+    models, save_dir_arg, seqids = _resolve_models(args)
+    run_dirs = [m["run_dir"] for m in models]
+    logger.info(f"Comparing {len(models)} model(s): {run_dirs}")
 
-    # Getting data for each run
-    run_data = _get_run_data(
-        run_dirs=run_dirs,
-    )
+    # Getting data for each model
+    run_data = _get_run_data(models)
 
     # Directory to save outputs
-    save_dir = _get_save_dir(
-        args=args,
-        run_data=run_data,
-    )
+    save_dir = _get_save_dir(save_dir_arg, run_data)
 
     # ids of all runs in analysis
     run_ids = list(run_data.keys())
@@ -1518,10 +872,7 @@ def main():
     )
 
     ref_peak_lf = None
-    check_phenix_logs = reference_paths.get(
-        "anomalous_peaks", ValueError("key not in reference_paths: anomalous_peaks")
-    )
-    if check_phenix_logs is not None:
+    if reference_paths.get("anomalous_peaks") is not None:
         ref_peak_lf = pl.scan_csv(reference_paths["anomalous_peaks"])
 
     ##################
@@ -1540,8 +891,6 @@ def main():
         .to_list()
     )
 
-    # TODO: Add seqids to args list of peak sequence ids to analyze
-    seqids = [204, 205, 206]
 
     # epoch_df
     epoch_df = pl.DataFrame({"epoch": epochs})
@@ -1568,7 +917,7 @@ def main():
         "median_signal",
     ]
     for m in metrics:
-        fig, ax = _plot_anomalous_metric(
+        fig, _ = _plot_anomalous_metric(
             peak_lf=peak_lf,
             run_ids=run_ids,
             epoch_df=epoch_df,
@@ -1576,17 +925,7 @@ def main():
             reference_data=ref_peak_lf,
             metric=m,
         )
-
-        fig.savefig(
-            f"{save_dir}/anomalous_{m}.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
+        _savefig(fig, f"{save_dir}/anomalous_{m}.png")
 
     # NOTE:
     # plotting anomalous peak heights
@@ -1596,42 +935,26 @@ def main():
         # reference peak
         ref_peak = ref_peak_df.filter(pl.col("seqid") == s)["peakz"].item()
 
-        fig, ax = plt.subplots(figsize=set_figsize())
         df_seq = lf.filter(pl.col("seqid") == s).collect().sort(["epoch", "seqid"])
 
+        series = []
         for rid in run_ids:
             df = df_seq.filter(pl.col("run_id") == rid)
             df = epoch_df.join(df, on="epoch", how="left").sort(["epoch", "seqid"])
 
             # use surrogate prior name as label
             label = f"{run_data[rid]['model_metadata']['qi_name']}_{rid}"
+            series.append((label, df["epoch"], df["peakz"], palette[rid]))
 
-            sns.lineplot(
-                x=df["epoch"],
-                y=df["peakz"],
-                label=label,
-                color=palette[rid],
-                ax=ax,
-            )
-
-        ax.axhline(ref_peak, c="red", label="DIALS")
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("peakz")
-        ax.set_title(f"Iodine {s} across models")
-        ax.legend()
-        sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 1))
-        ax.grid()
-
-        fig.savefig(
-            f"{save_dir}/anomalous_iod_{s}_model_peaks.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
+        fig, _ = plot_metric_over_epoch(
+            series,
+            ref_value=ref_peak,
+            ref_label="DIALS",
+            x_label="epoch",
+            y_label="peakz",
+            title=f"Iodine {s} across models",
         )
-
-        plt.close(fig)
+        _savefig(fig, f"{save_dir}/anomalous_iod_{s}_model_peaks.png")
 
     # Plotting Fano binned by resolution
     run_data.values()
@@ -1642,14 +965,8 @@ def main():
     lf_train_metrics = pl.scan_parquet(
         all_train_metrics, include_file_paths="filenames"
     )
-    lf_train_metrics = lf_train_metrics.with_columns(
-        [
-            pl.col("filenames").str.extract(r"/run-[^/]+-([^/]+)/", 1).alias("run_id"),
-            pl.col("filenames")
-            .str.extract(r"/train_epoch_(\d+).parquet", 1)
-            .cast(pl.Int32)  # optional
-            .alias("epoch"),
-        ]
+    lf_train_metrics = add_run_epoch_cols(
+        lf_train_metrics, epoch_pattern=r"/train_epoch_(\d+).parquet"
     )
 
     bin_labels, base_df = _get_bins(edges=INTENSITY_EDGES)
@@ -1674,33 +991,17 @@ def main():
             .sort(["epoch", "bin_labels"])
         ).collect()
 
-        cmap = sns.cubehelix_palette(
-            start=0.5, rot=-0.55, dark=0, light=0.8, as_cmap=True
+        fig, _ = plot_binned_metric_by_epoch(
+            lf_,
+            base_df,
+            epochs=epochs,
+            x_key="bin_id",
+            y_key="fano",
+            x_label="intensity bin",
+            y_label="fano",
+            x_tick_labels=base_df["bin_labels"].to_list(),
         )
-        cmap_list = cmap(np.linspace(0.0, 1, len(epochs), retstep=True)[0])
-
-        fig, ax = plt.subplots(figsize=set_figsize())
-        for c, ((e,), lf_epoch) in zip(
-            cmap_list,
-            lf_.group_by("epoch", maintain_order=True),
-        ):
-            joined = base_df.join(lf_epoch, on="bin_labels", how="left")
-            ax.plot(joined["bin_id"], joined["fano"], c=c)
-        ax.set_xlabel("intensity bin")
-        ax.set_xticklabels(joined["bin_labels"], rotation=45, ha="right")
-        ax.set_ylabel("fano")
-        ax.grid()
-
-        fig.savefig(
-            f"{save_dir}/run_{r}_fano.png",
-            transparent=True,
-            dpi=300,
-            facecolor="white",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
-
-        plt.close(fig)
+        _savefig(fig, f"{save_dir}/run_{r}_fano.png")
     # END TODO
 
     # %%
@@ -1735,16 +1036,7 @@ def main():
         y_key="mean_qi_var",
     )
 
-    fig.savefig(
-        f"{save_dir}/all_runs.mean_qi_var.binnned_by_res.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/all_runs.mean_qi_var.binnned_by_res.png")
 
     # Plotting mean qi.mean
     fig, ax = _plot_metric(
@@ -1759,16 +1051,7 @@ def main():
         y_key="mean_qi_mean",
     )
 
-    fig.savefig(
-        f"{save_dir}/all_runs.mean_qi_var.binned_by_{bin_label}.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/all_runs.mean_qi_var.binned_by_{bin_label}.png")
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1783,16 +1066,7 @@ def main():
         y_key="fano",
     )
 
-    fig.savefig(
-        f"{save_dir}/all_runs.mean_fano.binned_by_resolution.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/all_runs.mean_fano.binned_by_resolution.png")
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1807,16 +1081,7 @@ def main():
         y_key="var_qi_mean",
     )
 
-    fig.savefig(
-        f"{save_dir}/var_qi_mean_models_res_bin.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/var_qi_mean_models_res_bin.png")
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1832,16 +1097,7 @@ def main():
         y_scale=True,
     )
 
-    fig.savefig(
-        f"{save_dir}/var_qi_var_models_res_bin.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/var_qi_var_models_res_bin.png")
 
     # per epoch
     # binned by ersolution
@@ -1925,14 +1181,7 @@ def main():
         y_key="mean_qi_var",
     )
 
-    fig.savefig(
-        f"{save_dir}/mean_qi_var_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
+    _savefig(fig, f"{save_dir}/mean_qi_var_models_intensity_bins.png")
 
     # Plotting mean qi.mean
     fig, ax = _plot_metric(
@@ -1947,16 +1196,7 @@ def main():
         y_key="mean_qi_mean",
     )
 
-    fig.savefig(
-        f"{save_dir}/mean_qi_mean_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/mean_qi_mean_models_intensity_bins.png")
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -1971,16 +1211,7 @@ def main():
         y_key="fano",
     )
 
-    fig.savefig(
-        f"{save_dir}/mean_fano_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/mean_fano_models_intensity_bins.png")
 
     # Plotting variance(qi.mean)
 
@@ -1997,16 +1228,7 @@ def main():
         y_key="var_qi_mean",
     )
 
-    fig.savefig(
-        f"{save_dir}/var_qi_mean_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/var_qi_mean_models_intensity_bins.png")
 
     # Plotting mean fano
     fig, ax = _plot_metric(
@@ -2022,16 +1244,7 @@ def main():
         y_scale=True,
     )
 
-    fig.savefig(
-        f"{save_dir}/var_qi_var_models_intensity_bins.png",
-        transparent=True,
-        dpi=300,
-        facecolor="white",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-
-    plt.close(fig)
+    _savefig(fig, f"{save_dir}/var_qi_var_models_intensity_bins.png")
 
     # TODO:
     # Per epoch metrics
