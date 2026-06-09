@@ -942,8 +942,7 @@ def main():
             df = df_seq.filter(pl.col("run_id") == rid)
             df = epoch_df.join(df, on="epoch", how="left").sort(["epoch", "seqid"])
 
-            # use surrogate prior name as label
-            label = f"{run_data[rid]['model_metadata']['qi_name']}_{rid}"
+            label = run_data[rid]["label"]
             series.append((label, df["epoch"], df["peakz"], palette[rid]))
 
         fig, _ = plot_metric_over_epoch(
