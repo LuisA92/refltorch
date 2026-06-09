@@ -103,17 +103,56 @@ def add_run_epoch_cols(
 def _resolve_data_dir(run_cfg) -> Path | None:
     """Resolve a run's dataset directory from its training config.
 
+    Reads `data_loader.args.data_dir` (the integrator convention; the
+    `shoebox_file_names.data_dir` override wins if present), falling back to
+    `global_vars.data_dir` for other config vintages.
+
     Args:
         run_cfg: Parsed `run_metadata.yaml` (has a `config` path key).
 
     Returns:
-        The `global_vars.data_dir` directory, or None if it cannot be read.
+        The dataset directory, or None if it cannot be read.
     """
     try:
         cfg = load_config(run_cfg["config"])
-        return Path(cfg["global_vars"]["data_dir"])
     except (KeyError, FileNotFoundError, TypeError, OSError):
         return None
+    try:
+        dl = cfg["data_loader"]["args"]
+        sbox = dl.get("shoebox_file_names") or {}
+        return Path(sbox.get("data_dir") or dl["data_dir"])
+    except (KeyError, TypeError):
+        pass
+    try:
+        return Path(cfg["global_vars"]["data_dir"])
+    except (KeyError, TypeError):
+        return None
+
+
+def _resolve_metadata_path(run_cfg) -> Path | None:
+    """Resolve a run's `metadata.pt` path from its training config.
+
+    The filename comes from `data_loader.args.shoebox_file_names.reference`
+    (the per-reflection reference table, e.g. `metadata.pt`) under the
+    dataset directory.
+
+    Args:
+        run_cfg: Parsed `run_metadata.yaml` (has a `config` path key).
+
+    Returns:
+        The full `metadata.pt` path, or None if it cannot be resolved.
+    """
+    data_dir = _resolve_data_dir(run_cfg)
+    if data_dir is None:
+        return None
+    ref_name = "metadata.pt"
+    try:
+        cfg = load_config(run_cfg["config"])
+        sbox = cfg["data_loader"]["args"].get("shoebox_file_names") or {}
+        ref_name = sbox.get("reference") or "metadata.pt"
+    except (KeyError, FileNotFoundError, TypeError, OSError):
+        pass
+    return data_dir / ref_name
 
 
 def assemble_run_data(models) -> dict:
@@ -129,8 +168,9 @@ def assemble_run_data(models) -> dict:
     Returns:
         Mapping from run_id to a dict with `run_cfg`, `run_id`, `label`,
         `model_name`, `model_metadata`, `wandb_log_dir`, `preds`,
-        `phenix_logs`, `data_dir`, `epoch` (requested, may be None), and
-        `metadata` (override path, may be None).
+        `phenix_logs`, `data_dir`, `metadata_auto` (auto-resolved
+        `metadata.pt` path), `epoch` (requested, may be None), and
+        `metadata` (explicit override path, may be None).
     """
     run_data = {}
     for spec in models:
@@ -152,6 +192,7 @@ def assemble_run_data(models) -> dict:
             "preds": list(pred_dir.glob("**/preds_epoch_*.parquet")),
             "phenix_logs": list(pred_dir.glob("**/phenix_out/refine*.log")),
             "data_dir": _resolve_data_dir(run_cfg),
+            "metadata_auto": _resolve_metadata_path(run_cfg),
             "epoch": spec.get("epoch"),
             "metadata": spec.get("metadata"),
         }
@@ -169,7 +210,7 @@ def _find_metadata_pt(run, override=None) -> Path | None:
         The first existing candidate path, or None if none are found.
     """
     candidates = []
-    for cand in (override, run.get("metadata")):
+    for cand in (override, run.get("metadata"), run.get("metadata_auto")):
         if cand is not None:
             candidates.append(Path(cand))
     data_dir = run.get("data_dir")
