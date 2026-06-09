@@ -862,39 +862,47 @@ def _reflections_only_lf(run_data, pred_lf):
 
     Coset models carry extra coset samples (is_coset == True) that are not
     real reflections and that the control lacks; excluding them makes the
-    model-vs-model comparison fair. The is_coset flag is read from
-    `metadata.pt` and is indexed by `refl_ids`.
+    model-vs-model comparison fair. The is_coset flag is read per run from
+    `metadata.pt` (indexed by `refl_ids`). The control's metadata has no
+    is_coset field, so it contributes no mask and all its rows are kept; runs
+    that do expose it have their coset rows dropped. Masking per
+    (run_id, refl_ids) ensures a run is only ever filtered by its own flag.
 
     Args:
         run_data: The run_data mapping.
         pred_lf: Combined predictions LazyFrame.
 
     Returns:
-        Tuple of (filtered_lf, n_coset) where n_coset is the number of coset
-        entries in the metadata, or (None, 0) if no run exposes is_coset (or
-        no coset samples exist, so the filter would be a no-op).
+        Tuple of (filtered_lf, n_coset) where n_coset is the total number of
+        coset rows dropped, or (None, 0) if no run exposes any coset samples
+        (so the filter would be a no-op).
     """
-    coset_mask = None
+    maps = []
+    n_coset = 0
     for run in run_data:
         mask = load_coset_mask(run_data[run], override=run_data[run].get("metadata"))
-        if mask is not None:
-            coset_mask = mask
-            break
-    if coset_mask is None or not coset_mask.any():
+        if mask is None or not mask.any():
+            continue
+        n_coset += int(mask.sum())
+        maps.append(
+            pl.DataFrame(
+                {
+                    "run_id": run,
+                    "refl_ids": np.arange(len(mask), dtype=np.float32),
+                    "_is_coset": mask,
+                }
+            )
+        )
+    if not maps:
         return None, 0
 
-    map_df = pl.DataFrame(
-        {
-            "refl_ids": np.arange(len(coset_mask), dtype=np.float32),
-            "_is_coset": coset_mask,
-        }
-    ).lazy()
+    map_df = pl.concat(maps).lazy()
     filtered = (
-        pred_lf.join(map_df, on="refl_ids", how="left")
+        pred_lf.join(map_df, on=["run_id", "refl_ids"], how="left")
         .filter(~pl.col("_is_coset").fill_null(False))
         .drop("_is_coset")
     )
-    return filtered, int(coset_mask.sum())
+    return filtered, n_coset
 
 
 def _run_comparison(
