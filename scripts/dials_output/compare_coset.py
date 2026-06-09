@@ -18,6 +18,9 @@
 #       maps, model-vs-control log scatters, background histogram).
 #   refinement_values_overlay.png: all models on one R-value axes.
 #   correlations.csv: Pearson/Spearman table.
+#   reflections_only/...: the same comparison set recomputed on reflection
+#       samples only (is_coset == False), excluding the coset-only samples
+#       that the control lacks. Written only when coset samples are present.
 #
 # Reuses the same YAML config as compare_models.py (models/save_dir), plus two
 # optional keys:
@@ -44,6 +47,7 @@ from out_utils import (
     add_run_epoch_cols,
     assemble_run_data,
     join_models_on_refl,
+    load_coset_mask,
     load_detector_positions,
     resolve_dials_cols,
 )
@@ -853,33 +857,56 @@ def _fmt(v) -> str:
     return "n/a" if v is None else f"{v:.3f}"
 
 
-def main():
-    args = parse_args()
-    setup_logging(args.verbose)
+def _reflections_only_lf(run_data, pred_lf):
+    """Filter predictions to reflection samples (drop coset samples).
 
-    models, save_dir_arg = _resolve_models(args)
-    run_data = assemble_run_data(models)
+    Coset models carry extra coset samples (is_coset == True) that are not
+    real reflections and that the control lacks; excluding them makes the
+    model-vs-model comparison fair. The is_coset flag is read from
+    `metadata.pt` and is indexed by `refl_ids`.
 
-    first = next(iter(run_data.values()))
-    save_dir = Path(save_dir_arg or Path(first["wandb_log_dir"]) / "plots" / "coset")
+    Args:
+        run_data: The run_data mapping.
+        pred_lf: Combined predictions LazyFrame.
+
+    Returns:
+        Tuple of (filtered_lf, n_coset) where n_coset is the number of coset
+        entries in the metadata, or (None, 0) if no run exposes is_coset (or
+        no coset samples exist, so the filter would be a no-op).
+    """
+    coset_mask = None
+    for run in run_data:
+        mask = load_coset_mask(run_data[run], override=run_data[run].get("metadata"))
+        if mask is not None:
+            coset_mask = mask
+            break
+    if coset_mask is None or not coset_mask.any():
+        return None, 0
+
+    map_df = pl.DataFrame(
+        {
+            "refl_ids": np.arange(len(coset_mask), dtype=np.float32),
+            "_is_coset": coset_mask,
+        }
+    ).lazy()
+    filtered = (
+        pred_lf.join(map_df, on="refl_ids", how="left")
+        .filter(~pl.col("_is_coset").fill_null(False))
+        .drop("_is_coset")
+    )
+    return filtered, int(coset_mask.sum())
+
+
+def _run_comparison(
+    run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+):
+    """Run the full model-vs-model comparison on a predictions frame.
+
+    Writes detector grids, pairwise scatters/correlations, residual and
+    correlation vs resolution, the worst-bin investigation, and a
+    correlations.csv under `save_dir`.
+    """
     save_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("saving figures under %s", save_dir)
-
-    all_preds = [f for run in run_data.values() for f in run["preds"]]
-    if not all_preds:
-        raise ValueError("no prediction parquets found for any run")
-    pred_lf = pl.scan_parquet(all_preds, include_file_paths="filenames")
-    pred_lf = add_run_epoch_cols(pred_lf)
-
-    schema = pred_lf.collect_schema().names()
-    if "refl_ids" not in schema:
-        raise ValueError("predictions lack a `refl_ids` column; cannot align models")
-    dials_i, dials_bg = resolve_dials_cols(schema)
-    has_dials = dials_i in schema and dials_bg in schema
-    has_d = "d" in schema
-    sel_epoch = _resolve_epochs(run_data, pred_lf)
-    logger.info("selected epochs: %s", sel_epoch)
-
     corr_rows = []
     if has_dials:
         _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir)
@@ -910,6 +937,60 @@ def main():
     if corr_rows:
         pl.DataFrame(corr_rows).write_csv(f"{save_dir}/correlations.csv")
         logger.info("wrote %s/correlations.csv", save_dir)
+
+
+def main():
+    args = parse_args()
+    setup_logging(args.verbose)
+
+    models, save_dir_arg = _resolve_models(args)
+    run_data = assemble_run_data(models)
+
+    first = next(iter(run_data.values()))
+    save_dir = Path(save_dir_arg or Path(first["wandb_log_dir"]) / "plots" / "coset")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("saving figures under %s", save_dir)
+
+    all_preds = [f for run in run_data.values() for f in run["preds"]]
+    if not all_preds:
+        raise ValueError("no prediction parquets found for any run")
+    pred_lf = pl.scan_parquet(all_preds, include_file_paths="filenames")
+    pred_lf = add_run_epoch_cols(pred_lf)
+
+    schema = pred_lf.collect_schema().names()
+    if "refl_ids" not in schema:
+        raise ValueError("predictions lack a `refl_ids` column; cannot align models")
+    dials_i, dials_bg = resolve_dials_cols(schema)
+    has_dials = dials_i in schema and dials_bg in schema
+    has_d = "d" in schema
+    sel_epoch = _resolve_epochs(run_data, pred_lf)
+    logger.info("selected epochs: %s", sel_epoch)
+
+    # All samples (coset models include their coset samples).
+    _run_comparison(
+        run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+    )
+
+    # Reflection samples only (exclude coset samples for a fair comparison).
+    refl_lf, n_coset = _reflections_only_lf(run_data, pred_lf)
+    if refl_lf is not None:
+        logger.info(
+            "reflections-only pass: excluding %d coset samples -> %s",
+            n_coset,
+            save_dir / "reflections_only",
+        )
+        _run_comparison(
+            run_data,
+            refl_lf,
+            sel_epoch,
+            dials_i,
+            dials_bg,
+            has_d,
+            has_dials,
+            save_dir / "reflections_only",
+        )
+    else:
+        logger.info("no coset samples found; skipping reflections-only pass")
 
     _plot_rvalue_overlay(run_data, save_dir)
     logger.info("done")
