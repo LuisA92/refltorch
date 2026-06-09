@@ -5,13 +5,19 @@
 # directly to each other and over the detector face.
 #
 # Figures produced (saved under --save-dir):
-#   <run>/detector_{model_bg,model_intensity}.png    — stat over detector
-#   <run>/detector_resid_{bg,intensity}.png          — (model - DIALS) over detector
-#   pairs/{labelA}__vs__{labelB}.{bg,intensity}.png  — model-vs-model scatter
-#   pairs/corr_{bg,intensity}_vs_resolution.png      — per-pair correlation vs d
-#   residual_{bg,intensity}_vs_resolution.png        — per-model mean residual vs d
-#   refinement_values_overlay.png                    — all models on one R-value axes
-#   correlations.csv                                 — Pearson/Spearman table
+#   detector/detector_{stat}_{mean,median,min,max}.png: cross-model hexbin
+#       grids (one panel per model) on a shared color scale + colorbar, for
+#       model bg, model intensity, and the model-minus-DIALS residuals.
+#   detector/detector_diff_{bg,intensity}.png: pairwise model-A-minus-model-B
+#       difference maps over the detector (shared diverging colorbar).
+#   pairs/{labelA}__vs__{labelB}.{bg,intensity}.png: model-vs-model log scatter.
+#   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d.
+#   residual_{bg,intensity}_vs_resolution.png: per-model mean residual vs d.
+#   investigate/bin_{d}_bg_*.png: focused diagnostics for the worst
+#       bg-correlation resolution bin (per-model + minus-control detector
+#       maps, model-vs-control log scatters, background histogram).
+#   refinement_values_overlay.png: all models on one R-value axes.
+#   correlations.csv: Pearson/Spearman table.
 #
 # Reuses the same YAML config as compare_models.py (models/save_dir), plus two
 # optional keys:
@@ -29,6 +35,7 @@ from pathlib import Path
 import matplotlib as mpl
 
 mpl.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
@@ -48,7 +55,7 @@ from refltorch.plots import setup_mpl_config
 from refltorch.plots._shared import get_bins as _get_bins
 from refltorch.plots._shared import get_palette as _get_palette
 from refltorch.plots._shared import set_mpl_fonts
-from refltorch.plots.detector_plots import plot_hexbin_detector
+from refltorch.plots.detector_plots import plot_hexbin_detector_grid
 from refltorch.plots.metric_plots import plot_binned_metric
 from refltorch.plots.refinement_plots import plot_r_values
 from refltorch.plots.scatter_plots import plot_scatter_identity
@@ -63,6 +70,21 @@ sns.set_theme(
     font_scale=1.0,
 )
 set_mpl_fonts(10)
+
+# Detector hexbin stats: (filename tag, array key, colorbar label, diverging).
+DETECTOR_STATS = [
+    ("model_bg", "qbg_mean", "model background", False),
+    ("model_intensity", "qi_mean", "model intensity", False),
+    ("resid_bg", "resid_bg", "model - DIALS background", True),
+    ("resid_intensity", "resid_intensity", "model - DIALS intensity", True),
+]
+# Hexbin reductions applied within each detector cell.
+REDUCTIONS = {
+    "mean": np.mean,
+    "median": np.median,
+    "min": np.min,
+    "max": np.max,
+}
 
 
 def parse_args():
@@ -185,14 +207,6 @@ def _resolve_epochs(run_data, pred_lf) -> dict:
     return resolved
 
 
-def _robust_limits(values, lo=1, hi=99) -> tuple[float | None, float | None]:
-    arr = np.asarray(values, dtype=float)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return None, None
-    return float(np.percentile(arr, lo)), float(np.percentile(arr, hi))
-
-
 def _symmetric_limit(values, hi=99) -> tuple[float | None, float | None]:
     arr = np.asarray(values, dtype=float)
     arr = arr[np.isfinite(arr)]
@@ -210,93 +224,154 @@ def _corr(df, a, b, method) -> float | None:
     return sub.select(pl.corr(a, b, method=method)).item()
 
 
-def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
-    """Hexbin model bg/intensity and (model - DIALS) residuals over detector."""
-    for run in run_data:
-        pos = load_detector_positions(
-            run_data[run], override=run_data[run].get("metadata")
+def _detector_arrays(run_data, run, pred_lf, epoch, dials_i, dials_bg, *, d_range=None):
+    """Per-reflection detector x/y and stats for one run (optional d-range).
+
+    Args:
+        run_data: The run_data mapping.
+        run: Run id to extract.
+        pred_lf: Combined predictions LazyFrame.
+        epoch: Epoch to select for this run.
+        dials_i: DIALS intensity column name.
+        dials_bg: DIALS background column name.
+        d_range: Optional `(lo, hi)` resolution window (keeps `lo <= d < hi`).
+
+    Returns:
+        Dict with `refl_ids`, `x`, `y`, `qbg_mean`, `qi_mean`, `resid_bg`,
+        `resid_intensity` numpy arrays, or None if positions are unavailable.
+    """
+    pos = load_detector_positions(run_data[run], override=run_data[run].get("metadata"))
+    if pos is None:
+        return None
+    x_lut, y_lut = pos
+
+    flt = (pl.col("run_id") == run) & (pl.col("epoch") == epoch)
+    if d_range is not None:
+        lo, hi = d_range
+        flt = flt & (pl.col("d") >= lo) & (pl.col("d") < hi)
+    df = (
+        pred_lf.filter(flt)
+        .select(["refl_ids", "qbg_mean", "qi_mean", dials_i, dials_bg])
+        .collect()
+    )
+    rid = df["refl_ids"].to_numpy().astype(np.int64)
+    qbg = df["qbg_mean"].to_numpy()
+    qi = df["qi_mean"].to_numpy()
+    ref_i = df[dials_i].to_numpy()
+    ref_bg = df[dials_bg].to_numpy()
+
+    n = len(x_lut)
+    keep = (rid >= 0) & (rid < n)
+    if not keep.all():
+        logger.warning(
+            "run %s: %d/%d refl_ids out of metadata range; dropping",
+            run,
+            int((~keep).sum()),
+            keep.size,
         )
-        if pos is None:
+    rid = rid[keep]
+    return {
+        "refl_ids": rid,
+        "x": x_lut[rid],
+        "y": y_lut[rid],
+        "qbg_mean": qbg[keep],
+        "qi_mean": qi[keep],
+        "resid_bg": (qbg - ref_bg)[keep],
+        "resid_intensity": (qi - ref_i)[keep],
+    }
+
+
+def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
+    """Cross-model detector hexbin grids with a unified colorbar.
+
+    One grid per (stat, reduction) puts every model side by side on a shared
+    color scale (mean/median/min/max), plus pairwise model-difference grids
+    that localize where models disagree on the detector.
+    """
+    arrays = {}
+    for run in run_data:
+        arr = _detector_arrays(
+            run_data, run, pred_lf, sel_epoch[run], dials_i, dials_bg
+        )
+        if arr is None:
             logger.warning("no metadata.pt for run %s; skipping detector plots", run)
             continue
-        x_lut, y_lut = pos
-        label = run_data[run]["label"]
-        out_dir = save_dir / f"{run}"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        arrays[run] = arr
+    if not arrays:
+        return
 
-        df = (
-            pred_lf.filter(
-                (pl.col("run_id") == run) & (pl.col("epoch") == sel_epoch[run])
-            )
-            .select(["refl_ids", "qbg_mean", "qi_mean", dials_i, dials_bg])
-            .collect()
-        )
-        rid = df["refl_ids"].to_numpy().astype(np.int64)
-        qbg = df["qbg_mean"].to_numpy()
-        qi = df["qi_mean"].to_numpy()
-        ref_i = df[dials_i].to_numpy()
-        ref_bg = df[dials_bg].to_numpy()
+    out_dir = save_dir / "detector"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        n = len(x_lut)
-        keep = (rid >= 0) & (rid < n)
-        if not keep.all():
-            logger.warning(
-                "run %s: %d/%d refl_ids out of metadata range; dropping",
-                run,
-                int((~keep).sum()),
-                keep.size,
-            )
-        rid, qbg, qi, ref_i, ref_bg = (
-            rid[keep],
-            qbg[keep],
-            qi[keep],
-            ref_i[keep],
-            ref_bg[keep],
-        )
-        x, y = x_lut[rid], y_lut[rid]
-
-        panels = [
-            ("model_bg", qbg, "model background (mean)", None, _robust_limits(qbg)),
-            (
-                "model_intensity",
-                qi,
-                "model intensity (mean)",
-                None,
-                _robust_limits(qi),
-            ),
-            (
-                "resid_bg",
-                qbg - ref_bg,
-                "model - DIALS background",
-                "RdBu_r",
-                _symmetric_limit(qbg - ref_bg),
-            ),
-            (
-                "resid_intensity",
-                qi - ref_i,
-                "model - DIALS intensity",
-                "RdBu_r",
-                _symmetric_limit(qi - ref_i),
-            ),
-        ]
-        for name, c, clabel, cmap, (vmin, vmax) in panels:
-            fig, _ = plot_hexbin_detector(
-                x,
-                y,
-                c,
+    for name, key, clabel, diverging in DETECTOR_STATS:
+        for red_name, red_fn in REDUCTIONS.items():
+            panels = [
+                (run_data[r]["label"], arrays[r]["x"], arrays[r]["y"], arrays[r][key])
+                for r in arrays
+            ]
+            cmap, vmin, vmax = None, None, None
+            if diverging:
+                cmap = "RdBu_r"
+                vmin, vmax = _symmetric_limit(np.concatenate([p[3] for p in panels]))
+            fig, _ = plot_hexbin_detector_grid(
+                panels,
+                reduce=red_fn,
                 cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
-                clabel=clabel,
-                title=f"{label} (epoch {sel_epoch[run]})",
+                clabel=f"{clabel} ({red_name})",
+                suptitle=f"{clabel} over detector ({red_name})",
             )
-            _savefig(fig, f"{out_dir}/detector_{name}.png")
+            _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
+
+    _plot_detector_differences(run_data, arrays, out_dir)
+
+
+def _plot_detector_differences(run_data, arrays, out_dir):
+    """Pairwise (model A - model B) detector difference grids, shared colorbar."""
+    runs = list(arrays)
+    for metric_name, key in [("bg", "qbg_mean"), ("intensity", "qi_mean")]:
+        panels = []
+        for run_a, run_b in itertools.combinations(runs, 2):
+            a, b = arrays[run_a], arrays[run_b]
+            merged = pl.DataFrame(
+                {"refl_ids": a["refl_ids"], "va": a[key], "x": a["x"], "y": a["y"]}
+            ).join(
+                pl.DataFrame({"refl_ids": b["refl_ids"], "vb": b[key]}),
+                on="refl_ids",
+                how="inner",
+            )
+            if merged.height == 0:
+                continue
+            title = f"{run_data[run_a]['label']} - {run_data[run_b]['label']}"
+            panels.append(
+                (
+                    title,
+                    merged["x"].to_numpy(),
+                    merged["y"].to_numpy(),
+                    (merged["va"] - merged["vb"]).to_numpy(),
+                )
+            )
+        if not panels:
+            continue
+        vmin, vmax = _symmetric_limit(np.concatenate([p[3] for p in panels]))
+        fig, _ = plot_hexbin_detector_grid(
+            panels,
+            cmap="RdBu_r",
+            vmin=vmin,
+            vmax=vmax,
+            clabel=f"{metric_name} difference (A - B)",
+            suptitle=f"pairwise {metric_name} difference over detector",
+        )
+        _savefig(fig, f"{out_dir}/detector_diff_{metric_name}.png")
 
 
 def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
     """All-pairwise model-vs-model bg/intensity scatters and correlation table.
 
-    Returns the list of correlation-table rows (each a dict).
+    Returns:
+        Tuple of (rows, corr_by_bin) where rows is the list of correlation
+        table dicts and corr_by_bin maps metric -> {pair_id -> per-bin frame}.
     """
     out_dir = save_dir / "pairs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -324,7 +399,7 @@ def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
             continue
 
         for metric, key, log_scale, ax_label in [
-            ("bg", "qbg_mean", False, "background"),
+            ("bg", "qbg_mean", True, "background"),
             ("intensity", "qi_mean", True, "intensity"),
         ]:
             col_a, col_b = f"{key}_a", f"{key}_b"
@@ -369,7 +444,7 @@ def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
 
     if has_d:
         _plot_corr_vs_resolution(corr_by_bin, out_dir)
-    return rows
+    return rows, corr_by_bin
 
 
 def _corr_per_bin(joined, col_a, col_b) -> pl.DataFrame:
@@ -478,6 +553,254 @@ def _dials_corr_rows(run_data, pred_lf, sel_epoch, dials_i, dials_bg) -> list[di
     return rows
 
 
+def _find_control(run_data) -> str:
+    """Return the run id of the control model (label `control`), else the first."""
+    for run in run_data:
+        if str(run_data[run]["label"]).strip().lower() == "control":
+            return run
+    return next(iter(run_data))
+
+
+def _parse_bin_range(label) -> tuple[float, float] | None:
+    """Parse a closed bin label like `1.3 - 1.34` into `(lo, hi)`, else None."""
+    if label is None or " - " not in str(label):
+        return None
+    lo, hi = str(label).split(" - ")
+    try:
+        return float(lo), float(hi)
+    except ValueError:
+        return None
+
+
+def _worst_bin(corr_by_bin, key, control_label):
+    """Find the closed resolution bin with the lowest correlation.
+
+    Prefers pairs that involve the control; falls back to all pairs.
+
+    Returns:
+        Tuple of (bin_label, (lo, hi)) for the worst bin, or None.
+    """
+    df_map = corr_by_bin.get(key, {})
+    if not df_map:
+        return None
+    relevant = {p: d for p, d in df_map.items() if control_label in p} or df_map
+
+    per_bin = {}
+    for frame in relevant.values():
+        for row in frame.iter_rows(named=True):
+            label, corr = row["bin_labels"], row["corr"]
+            if label is None or corr is None:
+                continue
+            per_bin.setdefault(label, []).append(corr)
+
+    candidates = [
+        (label, rng, min(corrs))
+        for label, corrs in per_bin.items()
+        if (rng := _parse_bin_range(label)) is not None
+    ]
+    if not candidates:
+        return None
+    label, rng, _ = min(candidates, key=lambda item: item[2])
+    return label, rng
+
+
+def _investigate_worst_bin(
+    run_data, pred_lf, sel_epoch, dials_i, dials_bg, corr_by_bin, save_dir
+):
+    """Drill into the worst bg-correlation resolution bin vs the control.
+
+    Produces (within that bin) per-model background detector maps, model minus
+    control difference maps, model-vs-control log scatters, and a background
+    histogram, to localize where and why the models diverge from the control.
+    """
+    control = _find_control(run_data)
+    control_label = run_data[control]["label"]
+    worst = _worst_bin(corr_by_bin, "qbg_mean", control_label)
+    if worst is None:
+        logger.warning("could not identify a worst bg-correlation bin; skipping")
+        return
+    label, (lo, hi) = worst
+    logger.info(
+        "investigating worst bg-correlation bin '%s' (d in [%s, %s)) vs %s",
+        label,
+        lo,
+        hi,
+        control_label,
+    )
+
+    out_dir = save_dir / "investigate"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"d_{lo}_{hi}".replace(".", "p")
+
+    arrays = {}
+    for run in run_data:
+        arr = _detector_arrays(
+            run_data, run, pred_lf, sel_epoch[run], dials_i, dials_bg, d_range=(lo, hi)
+        )
+        if arr is not None and arr["x"].size:
+            arrays[run] = arr
+
+    if arrays:
+        panels = [
+            (
+                run_data[r]["label"],
+                arrays[r]["x"],
+                arrays[r]["y"],
+                arrays[r]["qbg_mean"],
+            )
+            for r in arrays
+        ]
+        fig, _ = plot_hexbin_detector_grid(
+            panels,
+            clabel="model background (mean)",
+            suptitle=f"background over detector, bin {label}",
+        )
+        _savefig(fig, f"{out_dir}/bin_{tag}_bg_detector.png")
+        _plot_bin_diff_vs_control(
+            run_data, arrays, control, control_label, label, tag, out_dir
+        )
+
+    _plot_bin_scatter_vs_control(
+        run_data,
+        pred_lf,
+        sel_epoch,
+        control,
+        control_label,
+        (lo, hi),
+        label,
+        tag,
+        out_dir,
+    )
+    _plot_bin_histogram(run_data, pred_lf, sel_epoch, (lo, hi), label, tag, out_dir)
+
+
+def _plot_bin_diff_vs_control(
+    run_data, arrays, control, control_label, label, tag, out_dir
+):
+    """Per-model (model - control) background detector maps within the bin."""
+    if control not in arrays:
+        return
+    cref = pl.DataFrame(
+        {"refl_ids": arrays[control]["refl_ids"], "vc": arrays[control]["qbg_mean"]}
+    )
+    panels = []
+    for run, arr in arrays.items():
+        if run == control:
+            continue
+        merged = pl.DataFrame(
+            {
+                "refl_ids": arr["refl_ids"],
+                "va": arr["qbg_mean"],
+                "x": arr["x"],
+                "y": arr["y"],
+            }
+        ).join(cref, on="refl_ids", how="inner")
+        if merged.height == 0:
+            continue
+        panels.append(
+            (
+                f"{run_data[run]['label']} - {control_label}",
+                merged["x"].to_numpy(),
+                merged["y"].to_numpy(),
+                (merged["va"] - merged["vc"]).to_numpy(),
+            )
+        )
+    if not panels:
+        return
+    vmin, vmax = _symmetric_limit(np.concatenate([p[3] for p in panels]))
+    fig, _ = plot_hexbin_detector_grid(
+        panels,
+        cmap="RdBu_r",
+        vmin=vmin,
+        vmax=vmax,
+        clabel=f"bg - {control_label} bg",
+        suptitle=f"background vs control over detector, bin {label}",
+    )
+    _savefig(fig, f"{out_dir}/bin_{tag}_bg_diff_vs_control.png")
+
+
+def _plot_bin_scatter_vs_control(
+    run_data, pred_lf, sel_epoch, control, control_label, d_range, label, tag, out_dir
+):
+    """Model-vs-control background log scatter within the bin, per model."""
+    lo, hi = d_range
+    for run in run_data:
+        if run == control:
+            continue
+        joined = join_models_on_refl(
+            pred_lf,
+            run,
+            sel_epoch[run],
+            control,
+            sel_epoch[control],
+            value_cols=["qbg_mean", "d"],
+        ).filter(
+            (pl.col("d_a") >= lo)
+            & (pl.col("d_a") < hi)
+            & (pl.col("qbg_mean_a") > 0)
+            & (pl.col("qbg_mean_b") > 0)
+        )
+        if joined.height == 0:
+            continue
+        xa = joined["qbg_mean_a"].to_numpy()
+        yb = joined["qbg_mean_b"].to_numpy()
+        pear = _corr(joined, "qbg_mean_a", "qbg_mean_b", "pearson")
+        spear = _corr(joined, "qbg_mean_a", "qbg_mean_b", "spearman")
+        bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
+        title = f"bin {label} bg: r={_fmt(pear)}, rho={_fmt(spear)} (n={joined.height})"
+        fig, _ = plot_scatter_identity(
+            xa,
+            yb,
+            identity=(max(bound[0], 1e-6), bound[1]),
+            xlabel=f"{run_data[run]['label']} background",
+            ylabel=f"{control_label} background",
+            title=title,
+            xscale="log",
+            yscale="log",
+        )
+        _savefig(fig, f"{out_dir}/bin_{tag}_bg_{run_data[run]['label']}_vs_control.png")
+
+
+def _plot_bin_histogram(run_data, pred_lf, sel_epoch, d_range, label, tag, out_dir):
+    """Overlaid per-model log-background histograms within the bin."""
+    lo, hi = d_range
+    palette = _get_palette(list(run_data))
+    fig, ax = plt.subplots(figsize=(7, 5))
+    drew = False
+    for run in run_data:
+        vals = (
+            pred_lf.filter(
+                (pl.col("run_id") == run)
+                & (pl.col("epoch") == sel_epoch[run])
+                & (pl.col("d") >= lo)
+                & (pl.col("d") < hi)
+                & (pl.col("qbg_mean") > 0)
+            )
+            .select("qbg_mean")
+            .collect()["qbg_mean"]
+            .to_numpy()
+        )
+        if vals.size == 0:
+            continue
+        ax.hist(
+            np.log10(vals),
+            bins=60,
+            histtype="step",
+            label=run_data[run]["label"],
+            color=palette[run],
+        )
+        drew = True
+    if not drew:
+        plt.close(fig)
+        return
+    ax.set_xlabel("log10 model background")
+    ax.set_ylabel("count")
+    ax.set_title(f"background distribution, bin {label}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    _savefig(fig, f"{out_dir}/bin_{tag}_bg_hist.png")
+
+
 def _plot_rvalue_overlay(run_data, save_dir):
     """Overlay every model's final R-work/R-free on a single axes."""
     dfs = []
@@ -563,13 +886,25 @@ def main():
     else:
         logger.warning("no DIALS reference columns; skipping detector/residual plots")
 
-    corr_rows += _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir)
+    pairwise_rows, corr_by_bin = _plot_pairwise(
+        run_data, pred_lf, sel_epoch, has_d, save_dir
+    )
+    corr_rows += pairwise_rows
 
     if has_dials:
         corr_rows += _dials_corr_rows(run_data, pred_lf, sel_epoch, dials_i, dials_bg)
         if has_d:
             _plot_residual_vs_resolution(
                 run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir
+            )
+            _investigate_worst_bin(
+                run_data,
+                pred_lf,
+                sel_epoch,
+                dials_i,
+                dials_bg,
+                corr_by_bin,
+                save_dir,
             )
 
     if corr_rows:
