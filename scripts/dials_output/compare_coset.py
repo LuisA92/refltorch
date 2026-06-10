@@ -8,25 +8,32 @@
 # control, which has no coset samples, is held to the same basis as the coset
 # models; the coset-inclusive set is written under all_samples/ for context.
 #
+# DIALS is included as a comparison target throughout (detector grids, scatters,
+# correlations), so every plot answers "how does each model compare to DIALS, on
+# real reflections" in the primary pass and "...including coset samples" under
+# all_samples/.
+#
 # Figures produced (saved under --save-dir):
 #   detector/detector_{stat}_{mean,median,min,max}.png: cross-model hexbin
-#       grids (one panel per model) on a shared color scale + colorbar, for
-#       model bg, model intensity, and the model-minus-DIALS residuals.
-#   detector/detector_dials_{bg,intensity}_{mean,median,min,max}.png: the
-#       (model-independent) DIALS bg/intensity over the detector.
+#       grids on a shared color scale + colorbar. The raw bg/intensity grids
+#       carry a DIALS panel alongside the model panels; the residual grids
+#       (model - DIALS) do not (DIALS minus DIALS is zero).
 #   detector/detector_diff_{bg,intensity}.png: pairwise model-A-minus-model-B
 #       difference maps over the detector (shared diverging colorbar).
 #   pairs/{labelA}__vs__{labelB}.{bg,intensity}.png: model-vs-model log scatter.
-#   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d.
+#   pairs/{label}__vs__DIALS.{bg,intensity}.png: model-vs-DIALS log scatter.
+#   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d, one
+#       line per model-vs-model pair and per model-vs-DIALS comparison.
 #   residual_{bg,intensity}_vs_resolution.png: per-model mean residual vs d.
 #   investigate/bin_{d}_bg_*.png: focused diagnostics for the worst
 #       bg-correlation resolution bin (per-model + DIALS detector maps,
 #       minus-control maps, model-vs-control and model-vs-DIALS log scatters,
 #       and a background histogram with the DIALS distribution overlaid).
 #   refinement_values_overlay.png: all models on one R-value axes.
-#   correlations.csv: Pearson/Spearman table.
+#   correlations.csv: Pearson/Spearman table (model-vs-model and model-vs-DIALS).
 #   all_samples/...: the same comparison set recomputed on every sample
-#       (coset samples included). Written only when coset samples are present.
+#       (coset samples included). Written only when coset samples are present;
+#       the primary save_dir set is reflection-only (cosets filtered out).
 #
 # Reuses the same YAML config as compare_models.py (models/save_dir), plus two
 # optional keys:
@@ -66,10 +73,7 @@ from refltorch.plots._shared import get_bins as _get_bins
 from refltorch.plots._shared import get_palette as _get_palette
 from refltorch.plots._shared import set_figsize as _set_figsize
 from refltorch.plots._shared import set_mpl_fonts
-from refltorch.plots.detector_plots import (
-    plot_hexbin_detector,
-    plot_hexbin_detector_grid,
-)
+from refltorch.plots.detector_plots import plot_hexbin_detector_grid
 from refltorch.plots.metric_plots import plot_binned_metric
 from refltorch.plots.refinement_plots import plot_r_values
 from refltorch.plots.scatter_plots import plot_scatter_identity
@@ -87,11 +91,14 @@ set_mpl_fonts(10)
 
 # Detector hexbin stats: (filename tag, array key, colorbar label, diverging).
 DETECTOR_STATS = [
-    ("model_bg", "qbg_mean", "model background", False),
-    ("model_intensity", "qi_mean", "model intensity", False),
+    ("model_bg", "qbg_mean", "background", False),
+    ("model_intensity", "qi_mean", "intensity", False),
     ("resid_bg", "resid_bg", "model - DIALS background", True),
     ("resid_intensity", "resid_intensity", "model - DIALS intensity", True),
 ]
+# Raw detector stats get an in-grid DIALS reference panel (the residual stats
+# do not: DIALS minus DIALS is zero). Maps the stat tag to its DIALS array key.
+DIALS_DETECTOR_KEY = {"model_bg": "dials_bg", "model_intensity": "dials_intensity"}
 # Hexbin reductions applied within each detector cell.
 REDUCTIONS = {
     "mean": np.mean,
@@ -323,12 +330,20 @@ def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
     out_dir = save_dir / "detector"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Representative run for the model-independent DIALS reference panel.
+    rep = _find_control(run_data)
+    if rep not in arrays:
+        rep = next(iter(arrays))
+
     for name, key, clabel, diverging in DETECTOR_STATS:
         for red_name, red_fn in REDUCTIONS.items():
             panels = [
                 (run_data[r]["label"], arrays[r]["x"], arrays[r]["y"], arrays[r][key])
                 for r in arrays
             ]
+            if name in DIALS_DETECTOR_KEY:
+                d = arrays[rep]
+                panels.append(("DIALS", d["x"], d["y"], d[DIALS_DETECTOR_KEY[name]]))
             cmap, vmin, vmax = None, None, None
             if diverging:
                 cmap = "RdBu_r"
@@ -344,34 +359,7 @@ def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
             )
             _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
 
-    _plot_dials_detector(run_data, arrays, out_dir)
     _plot_detector_differences(run_data, arrays, out_dir)
-
-
-def _plot_dials_detector(run_data, arrays, out_dir):
-    """DIALS bg/intensity over the detector (one map per reduction).
-
-    The DIALS reference columns are model-independent, so a single
-    representative run (the control when present) provides the values.
-    """
-    rep = _find_control(run_data)
-    if rep not in arrays:
-        rep = next(iter(arrays))
-    a = arrays[rep]
-    for name, key, clabel in [
-        ("dials_bg", "dials_bg", "DIALS background"),
-        ("dials_intensity", "dials_intensity", "DIALS intensity"),
-    ]:
-        for red_name, red_fn in REDUCTIONS.items():
-            fig, _ = plot_hexbin_detector(
-                a["x"],
-                a["y"],
-                a[key],
-                reduce=red_fn,
-                clabel=f"{clabel} ({red_name})",
-                title=f"{clabel} over detector ({red_name})",
-            )
-            _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
 
 
 def _plot_detector_differences(run_data, arrays, out_dir):
@@ -413,8 +401,14 @@ def _plot_detector_differences(run_data, arrays, out_dir):
         _savefig(fig, f"{out_dir}/detector_diff_{metric_name}.png")
 
 
-def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
-    """All-pairwise model-vs-model bg/intensity scatters and correlation table.
+def _plot_pairwise(
+    run_data, pred_lf, sel_epoch, has_d, save_dir, *, dials_i, dials_bg, has_dials
+):
+    """All-pairwise model-vs-model (and model-vs-DIALS) scatters and corr table.
+
+    Every model is also scattered against DIALS, and the per-resolution
+    correlation plot carries a line for each model-vs-model pair and each
+    model-vs-DIALS comparison.
 
     Returns:
         Tuple of (rows, corr_by_bin) where rows is the list of correlation
@@ -490,17 +484,82 @@ def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
             if has_d:
                 corr_by_bin[key][pair_id] = _corr_per_bin(joined, col_a, col_b)
 
+    if has_dials:
+        _dials_pairs(
+            run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
+        )
+
     if has_d:
         _plot_corr_vs_resolution(corr_by_bin, out_dir)
     return rows, corr_by_bin
 
 
-def _corr_per_bin(joined, col_a, col_b) -> pl.DataFrame:
-    """Pearson correlation of two columns within each resolution bin."""
+def _dials_pairs(
+    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
+):
+    """Per-model model-vs-DIALS bg/intensity log scatters and per-bin corr.
+
+    Treats DIALS as another comparison target: one scatter per model per
+    metric, plus a `{label}__vs__DIALS` series fed into the correlation-vs-
+    resolution plot alongside the model-vs-model pairs.
+    """
+    for run in run_data:
+        label = run_data[run]["label"]
+        pair_id = f"{label}__vs__DIALS"
+        cols = ["qbg_mean", "qi_mean", dials_bg, dials_i] + (["d"] if has_d else [])
+        df = (
+            pred_lf.filter(
+                (pl.col("run_id") == run) & (pl.col("epoch") == sel_epoch[run])
+            )
+            .select(cols)
+            .collect()
+        )
+        if df.height == 0:
+            continue
+        for metric, mcol, dcol, ax_label in [
+            ("bg", "qbg_mean", dials_bg, "background"),
+            ("intensity", "qi_mean", dials_i, "intensity"),
+        ]:
+            pear = _corr(df, mcol, dcol, "pearson")
+            spear = _corr(df, mcol, dcol, "spearman")
+            sdf = df.filter((pl.col(mcol) > 0) & (pl.col(dcol) > 0))
+            xa = sdf[mcol].to_numpy()
+            yb = sdf[dcol].to_numpy()
+            if xa.size == 0:
+                continue
+            hi = float(max(xa.max(), yb.max()))
+            lo = float(min(xa.min(), yb.min()))
+            title = f"{metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={sdf.height})"
+            fig, _ = plot_scatter_identity(
+                xa,
+                yb,
+                identity=(max(lo, 1e-6), hi),
+                xlabel=f"{label} {ax_label}",
+                ylabel=f"DIALS {ax_label}",
+                title=title,
+                xscale="log",
+                yscale="log",
+                figsize=SCATTER_FIGSIZE,
+            )
+            _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
+            if has_d:
+                corr_by_bin[mcol][pair_id] = _corr_per_bin(df, mcol, dcol, d_col="d")
+
+
+def _corr_per_bin(df, col_a, col_b, *, d_col="d_a") -> pl.DataFrame:
+    """Pearson correlation of two columns within each resolution bin.
+
+    Args:
+        df: Frame holding `col_a`, `col_b`, and the resolution column `d_col`.
+        col_a: First value column.
+        col_b: Second value column.
+        d_col: Resolution column to bin on (`d_a` for model-vs-model joins,
+            `d` for a single run's model-vs-DIALS frame).
+    """
     bin_labels, _ = _get_bins(edges=DIALS_EDGES_9B7C)
     return (
-        joined.with_columns(
-            pl.col("d_a").cut(DIALS_EDGES_9B7C, labels=bin_labels).alias("bin_labels")
+        df.with_columns(
+            pl.col(d_col).cut(DIALS_EDGES_9B7C, labels=bin_labels).alias("bin_labels")
         )
         .group_by("bin_labels")
         .agg(corr=pl.corr(col_a, col_b))
@@ -523,8 +582,8 @@ def _plot_corr_vs_resolution(corr_by_bin, out_dir):
             labels={p: p for p in pair_ids},
             y_key="corr",
             x_label="resolution bin",
-            y_label=f"{metric} correlation (A vs B)",
-            title=f"model-vs-model {metric} correlation",
+            y_label=f"{metric} correlation (per pair)",
+            title=f"{metric} correlation vs resolution (model-vs-model and DIALS)",
         )
         _savefig(fig, f"{out_dir}/corr_{metric}_vs_resolution.png")
 
@@ -1008,10 +1067,23 @@ def _reflections_only_lf(run_data, pred_lf):
     maps = []
     n_coset = 0
     for run in run_data:
+        label = run_data[run]["label"]
         mask = load_coset_mask(run_data[run], override=run_data[run].get("metadata"))
-        if mask is None or not mask.any():
+        if mask is None:
+            logger.warning(
+                "run %s (%s): no is_coset in metadata.pt; treated as "
+                "reflections-only (its coset samples, if any, are NOT filtered "
+                "out). Point this run's `metadata:` at the merged metadata.pt.",
+                run,
+                label,
+            )
             continue
-        n_coset += int(mask.sum())
+        n = int(mask.sum())
+        if n == 0:
+            logger.info("run %s (%s): is_coset present, 0 coset samples", run, label)
+            continue
+        logger.info("run %s (%s): filtering out %d coset samples", run, label, n)
+        n_coset += n
         maps.append(
             pl.DataFrame(
                 {
@@ -1050,7 +1122,14 @@ def _run_comparison(
         logger.warning("no DIALS reference columns; skipping detector/residual plots")
 
     pairwise_rows, corr_by_bin = _plot_pairwise(
-        run_data, pred_lf, sel_epoch, has_d, save_dir
+        run_data,
+        pred_lf,
+        sel_epoch,
+        has_d,
+        save_dir,
+        dials_i=dials_i,
+        dials_bg=dials_bg,
+        has_dials=has_dials,
     )
     corr_rows += pairwise_rows
 
