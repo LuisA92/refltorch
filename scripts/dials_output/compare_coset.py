@@ -25,10 +25,11 @@
 #   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d, one
 #       line per model-vs-model pair and per model-vs-DIALS comparison.
 #   residual_{bg,intensity}_vs_resolution.png: per-model mean residual vs d.
-#   investigate/bin_{d}_bg_*.png: focused diagnostics for the worst
-#       bg-correlation resolution bin (per-model + DIALS detector maps,
-#       minus-control maps, model-vs-control and model-vs-DIALS log scatters,
-#       and a background histogram with the DIALS distribution overlaid).
+#   investigate/bin_{d}_{bg,intensity}_*.png: focused diagnostics for the worst
+#       model-vs-control correlation resolution bin (found separately for bg and
+#       intensity): per-model + DIALS detector maps, minus-control maps,
+#       model-vs-control and model-vs-DIALS log scatters, and a value histogram
+#       with the DIALS distribution overlaid.
 #   refinement_values_overlay.png: all models on one R-value axes, with the
 #       DIALS reference R-work/R-free drawn as horizontal lines.
 #   correlations.csv: Pearson/Spearman table (model-vs-model and model-vs-DIALS).
@@ -242,6 +243,52 @@ def _symmetric_limit(values, hi=99) -> tuple[float | None, float | None]:
     return -v, v
 
 
+def _pooled_log_limits(
+    run_data, pred_lf, sel_epoch, cols, *, lo=0.5, hi=99.5, pad=1.3, d_range=None
+) -> tuple[float, float] | None:
+    """Shared robust (min, max) log-axis limits pooled over `cols` across runs.
+
+    Pools the positive values of every column in `cols` over all runs (and,
+    optionally, a resolution window) and returns padded `lo`/`hi` percentile
+    limits. Applying one such range to every scatter of a metric gives all the
+    panels identical axes, so they can be read side by side; robust percentiles
+    keep extreme outliers (e.g. a DIALS intensity tail near 1e-6) from blowing
+    the range out into blank space. Returns None if there are no positive
+    values.
+
+    Args:
+        run_data: The run_data mapping.
+        pred_lf: Combined predictions LazyFrame.
+        sel_epoch: Mapping from run id to its selected epoch.
+        cols: Columns whose pooled values set the range (model and/or DIALS).
+        lo: Lower percentile (0-100).
+        hi: Upper percentile (0-100).
+        pad: Multiplicative breathing room applied to each end.
+        d_range: Optional `(lo, hi)` resolution window (keeps `lo <= d < hi`).
+    """
+    parts = []
+    for run in run_data:
+        flt = (pl.col("run_id") == run) & (pl.col("epoch") == sel_epoch[run])
+        if d_range is not None:
+            lo_d, hi_d = d_range
+            flt = flt & (pl.col("d") >= lo_d) & (pl.col("d") < hi_d)
+        base = pred_lf.filter(flt)
+        for c in cols:
+            parts.append(base.select(pl.col(c).alias("v")))
+    res = (
+        pl.concat(parts)
+        .filter(pl.col("v") > 0)
+        .select(
+            pl.col("v").quantile(lo / 100).alias("lo"),
+            pl.col("v").quantile(hi / 100).alias("hi"),
+        )
+        .collect()
+    )
+    if res.height == 0 or res["lo"][0] is None or res["hi"][0] is None:
+        return None
+    return float(res["lo"][0]) / pad, float(res["hi"][0]) * pad
+
+
 def _corr(df, a, b, method) -> float | None:
     """Return the Pearson or Spearman correlation of two columns, or None."""
     sub = df.select(a, b).drop_nulls()
@@ -423,6 +470,15 @@ def _plot_pairwise(
     runs = list(run_data)
     corr_by_bin = {"qbg_mean": {}, "qi_mean": {}}
 
+    # Shared per-metric axis range (pooled over all models and DIALS) so every
+    # scatter of a metric uses identical xlim/ylim and reads side by side.
+    bg_cols = ["qbg_mean"] + ([dials_bg] if has_dials else [])
+    i_cols = ["qi_mean"] + ([dials_i] if has_dials else [])
+    share = {
+        "qbg_mean": _pooled_log_limits(run_data, pred_lf, sel_epoch, bg_cols),
+        "qi_mean": _pooled_log_limits(run_data, pred_lf, sel_epoch, i_cols),
+    }
+
     for run_a, run_b in itertools.combinations(runs, 2):
         label_a = run_data[run_a]["label"]
         label_b = run_data[run_b]["label"]
@@ -466,18 +522,22 @@ def _plot_pairwise(
             yb = sdf[col_b].to_numpy()
             if xa.size == 0:
                 continue
-            hi = float(max(xa.max(), yb.max()))
-            lo = float(min(xa.min(), yb.min())) if log_scale else 0.0
+            lim = share[key]
+            lo_pt = max(float(min(xa.min(), yb.min())), 1e-6) if log_scale else 0.0
+            hi_pt = float(max(xa.max(), yb.max()))
+            identity = lim if lim is not None else (lo_pt, hi_pt)
             title = f"{metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={sdf.height})"
             fig, _ = plot_scatter_identity(
                 xa,
                 yb,
-                identity=(max(lo, 1e-6) if log_scale else lo, hi),
+                identity=identity,
                 xlabel=f"{label_a} {ax_label}",
                 ylabel=f"{label_b} {ax_label}",
                 title=title,
                 xscale="log" if log_scale else "linear",
                 yscale="log" if log_scale else "linear",
+                xlim=lim,
+                ylim=lim,
                 figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
@@ -487,7 +547,15 @@ def _plot_pairwise(
 
     if has_dials:
         _dials_pairs(
-            run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
+            run_data,
+            pred_lf,
+            sel_epoch,
+            has_d,
+            out_dir,
+            dials_i,
+            dials_bg,
+            corr_by_bin,
+            share,
         )
 
     if has_d:
@@ -496,7 +564,7 @@ def _plot_pairwise(
 
 
 def _dials_pairs(
-    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
+    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin, share
 ):
     """Per-model model-vs-DIALS bg/intensity log scatters and per-bin corr.
 
@@ -528,18 +596,22 @@ def _dials_pairs(
             yb = sdf[dcol].to_numpy()
             if xa.size == 0:
                 continue
+            lim = share[mcol]
+            lo = max(float(min(xa.min(), yb.min())), 1e-6)
             hi = float(max(xa.max(), yb.max()))
-            lo = float(min(xa.min(), yb.min()))
+            identity = lim if lim is not None else (lo, hi)
             title = f"{metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={sdf.height})"
             fig, _ = plot_scatter_identity(
                 xa,
                 yb,
-                identity=(max(lo, 1e-6), hi),
+                identity=identity,
                 xlabel=f"{label} {ax_label}",
                 ylabel=f"DIALS {ax_label}",
                 title=title,
                 xscale="log",
                 yscale="log",
+                xlim=lim,
+                ylim=lim,
                 figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
@@ -691,7 +763,9 @@ def _worst_bin(corr_by_bin, key, control_label):
     df_map = corr_by_bin.get(key, {})
     if not df_map:
         return None
-    relevant = {p: d for p, d in df_map.items() if control_label in p} or df_map
+    relevant = {
+        p: d for p, d in df_map.items() if control_label in p and "__vs__DIALS" not in p
+    } or df_map
 
     per_bin = {}
     for frame in relevant.values():
@@ -712,93 +786,161 @@ def _worst_bin(corr_by_bin, key, control_label):
     return label, rng
 
 
+# Investigated metrics: (tag, model array/column, DIALS detector array key,
+# axis label). The DIALS reference column name is resolved at runtime.
+INVESTIGATE_METRICS = [
+    ("bg", "qbg_mean", "dials_bg", "background"),
+    ("intensity", "qi_mean", "dials_intensity", "intensity"),
+]
+
+
 def _investigate_worst_bin(
     run_data, pred_lf, sel_epoch, dials_i, dials_bg, corr_by_bin, save_dir
 ):
-    """Drill into the worst bg-correlation resolution bin vs the control.
+    """Drill into the worst-correlation resolution bin vs the control.
 
-    Produces (within that bin) per-model background detector maps, model minus
-    control difference maps, model-vs-control log scatters, and a background
-    histogram, to localize where and why the models diverge from the control.
+    Runs for both background and intensity: each finds the resolution bin with
+    the lowest model-vs-control correlation and, within that bin, produces
+    per-model + DIALS detector maps, model-minus-control difference maps,
+    model-vs-control and model-vs-DIALS log scatters, and a value histogram with
+    the DIALS distribution overlaid, to localize where the models diverge.
     """
     control = _find_control(run_data)
     control_label = run_data[control]["label"]
-    worst = _worst_bin(corr_by_bin, "qbg_mean", control_label)
-    if worst is None:
-        logger.warning("could not identify a worst bg-correlation bin; skipping")
-        return
-    label, (lo, hi) = worst
-    logger.info(
-        "investigating worst bg-correlation bin '%s' (d in [%s, %s)) vs %s",
-        label,
-        lo,
-        hi,
-        control_label,
-    )
-
     out_dir = save_dir / "investigate"
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"d_{lo}_{hi}".replace(".", "p")
+    dials_col = {"dials_bg": dials_bg, "dials_intensity": dials_i}
 
-    arrays = {}
-    for run in run_data:
-        arr = _detector_arrays(
-            run_data, run, pred_lf, sel_epoch[run], dials_i, dials_bg, d_range=(lo, hi)
+    for metric, model_col, dials_key, axis_label in INVESTIGATE_METRICS:
+        ref_col = dials_col[dials_key]
+        worst = _worst_bin(corr_by_bin, model_col, control_label)
+        if worst is None:
+            logger.warning("no worst %s-correlation bin found; skipping", metric)
+            continue
+        label, (lo, hi) = worst
+        logger.info(
+            "investigating worst %s-correlation bin '%s' (d in [%s, %s)) vs %s",
+            metric,
+            label,
+            lo,
+            hi,
+            control_label,
         )
-        if arr is not None and arr["x"].size:
-            arrays[run] = arr
+        tag = f"d_{lo}_{hi}".replace(".", "p")
 
-    if arrays:
-        panels = [
-            (
-                run_data[r]["label"],
-                arrays[r]["x"],
-                arrays[r]["y"],
-                arrays[r]["qbg_mean"],
+        arrays = {}
+        for run in run_data:
+            arr = _detector_arrays(
+                run_data,
+                run,
+                pred_lf,
+                sel_epoch[run],
+                dials_i,
+                dials_bg,
+                d_range=(lo, hi),
             )
-            for r in arrays
-        ]
-        rep = control if control in arrays else next(iter(arrays))
-        panels.append(
-            ("DIALS", arrays[rep]["x"], arrays[rep]["y"], arrays[rep]["dials_bg"])
-        )
-        fig, _ = plot_hexbin_detector_grid(
-            panels,
-            clabel="background (mean)",
-            suptitle=f"background over detector (model and DIALS), bin {label}",
-        )
-        _savefig(fig, f"{out_dir}/bin_{tag}_bg_detector.png")
-        _plot_bin_diff_vs_control(
-            run_data, arrays, control, control_label, label, tag, out_dir
-        )
+            if arr is not None and arr["x"].size:
+                arrays[run] = arr
 
-    _plot_bin_scatter_vs_control(
-        run_data,
-        pred_lf,
-        sel_epoch,
-        control,
-        control_label,
-        (lo, hi),
-        label,
-        tag,
-        out_dir,
-    )
-    _plot_bin_scatter_vs_dials(
-        run_data, pred_lf, sel_epoch, dials_bg, (lo, hi), label, tag, out_dir
-    )
-    _plot_bin_histogram(
-        run_data, pred_lf, sel_epoch, dials_bg, (lo, hi), label, tag, out_dir
-    )
+        if arrays:
+            panels = [
+                (
+                    run_data[r]["label"],
+                    arrays[r]["x"],
+                    arrays[r]["y"],
+                    arrays[r][model_col],
+                )
+                for r in arrays
+            ]
+            rep = control if control in arrays else next(iter(arrays))
+            panels.append(
+                ("DIALS", arrays[rep]["x"], arrays[rep]["y"], arrays[rep][dials_key])
+            )
+            fig, _ = plot_hexbin_detector_grid(
+                panels,
+                clabel=f"{axis_label} (mean)",
+                suptitle=f"{axis_label} over detector (model and DIALS), bin {label}",
+            )
+            _savefig(fig, f"{out_dir}/bin_{tag}_{metric}_detector.png")
+            _plot_bin_diff_vs_control(
+                run_data,
+                arrays,
+                control,
+                control_label,
+                model_col,
+                metric,
+                axis_label,
+                label,
+                tag,
+                out_dir,
+            )
+
+        # Shared axis range over the in-bin model and DIALS values so the
+        # vs-control and vs-DIALS scatters for this metric share identical axes.
+        bin_share = _pooled_log_limits(
+            run_data, pred_lf, sel_epoch, [model_col, ref_col], d_range=(lo, hi)
+        )
+        _plot_bin_scatter_vs_control(
+            run_data,
+            pred_lf,
+            sel_epoch,
+            control,
+            control_label,
+            model_col,
+            metric,
+            axis_label,
+            (lo, hi),
+            label,
+            tag,
+            out_dir,
+            bin_share,
+        )
+        _plot_bin_scatter_vs_dials(
+            run_data,
+            pred_lf,
+            sel_epoch,
+            model_col,
+            ref_col,
+            metric,
+            axis_label,
+            (lo, hi),
+            label,
+            tag,
+            out_dir,
+            bin_share,
+        )
+        _plot_bin_histogram(
+            run_data,
+            pred_lf,
+            sel_epoch,
+            model_col,
+            ref_col,
+            metric,
+            axis_label,
+            (lo, hi),
+            label,
+            tag,
+            out_dir,
+        )
 
 
 def _plot_bin_diff_vs_control(
-    run_data, arrays, control, control_label, label, tag, out_dir
+    run_data,
+    arrays,
+    control,
+    control_label,
+    model_col,
+    metric,
+    axis_label,
+    label,
+    tag,
+    out_dir,
 ):
-    """Per-model (model - control) background detector maps within the bin."""
+    """Per-model (model - control) detector maps for one metric within the bin."""
     if control not in arrays:
         return
     cref = pl.DataFrame(
-        {"refl_ids": arrays[control]["refl_ids"], "vc": arrays[control]["qbg_mean"]}
+        {"refl_ids": arrays[control]["refl_ids"], "vc": arrays[control][model_col]}
     )
     panels = []
     for run, arr in arrays.items():
@@ -807,7 +949,7 @@ def _plot_bin_diff_vs_control(
         merged = pl.DataFrame(
             {
                 "refl_ids": arr["refl_ids"],
-                "va": arr["qbg_mean"],
+                "va": arr[model_col],
                 "x": arr["x"],
                 "y": arr["y"],
             }
@@ -830,17 +972,30 @@ def _plot_bin_diff_vs_control(
         cmap="RdBu_r",
         vmin=vmin,
         vmax=vmax,
-        clabel=f"bg - {control_label} bg",
-        suptitle=f"background vs control over detector, bin {label}",
+        clabel=f"{axis_label} - {control_label} {axis_label}",
+        suptitle=f"{axis_label} vs control over detector, bin {label}",
     )
-    _savefig(fig, f"{out_dir}/bin_{tag}_bg_diff_vs_control.png")
+    _savefig(fig, f"{out_dir}/bin_{tag}_{metric}_diff_vs_control.png")
 
 
 def _plot_bin_scatter_vs_control(
-    run_data, pred_lf, sel_epoch, control, control_label, d_range, label, tag, out_dir
+    run_data,
+    pred_lf,
+    sel_epoch,
+    control,
+    control_label,
+    model_col,
+    metric,
+    axis_label,
+    d_range,
+    label,
+    tag,
+    out_dir,
+    lim,
 ):
-    """Model-vs-control background log scatter within the bin, per model."""
+    """Model-vs-control log scatter for one metric within the bin, per model."""
     lo, hi = d_range
+    col_a, col_b = f"{model_col}_a", f"{model_col}_b"
     for run in run_data:
         if run == control:
             continue
@@ -850,39 +1005,57 @@ def _plot_bin_scatter_vs_control(
             sel_epoch[run],
             control,
             sel_epoch[control],
-            value_cols=["qbg_mean", "d"],
+            value_cols=[model_col, "d"],
         ).filter(
             (pl.col("d_a") >= lo)
             & (pl.col("d_a") < hi)
-            & (pl.col("qbg_mean_a") > 0)
-            & (pl.col("qbg_mean_b") > 0)
+            & (pl.col(col_a) > 0)
+            & (pl.col(col_b) > 0)
         )
         if joined.height == 0:
             continue
-        xa = joined["qbg_mean_a"].to_numpy()
-        yb = joined["qbg_mean_b"].to_numpy()
-        pear = _corr(joined, "qbg_mean_a", "qbg_mean_b", "pearson")
-        spear = _corr(joined, "qbg_mean_a", "qbg_mean_b", "spearman")
+        xa = joined[col_a].to_numpy()
+        yb = joined[col_b].to_numpy()
+        pear = _corr(joined, col_a, col_b, "pearson")
+        spear = _corr(joined, col_a, col_b, "spearman")
         bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
-        title = f"bin {label} bg: r={_fmt(pear)}, rho={_fmt(spear)} (n={joined.height})"
+        identity = lim if lim is not None else (max(bound[0], 1e-6), bound[1])
+        title = (
+            f"bin {label} {metric}: r={_fmt(pear)}, rho={_fmt(spear)} "
+            f"(n={joined.height})"
+        )
         fig, _ = plot_scatter_identity(
             xa,
             yb,
-            identity=(max(bound[0], 1e-6), bound[1]),
-            xlabel=f"{run_data[run]['label']} background",
-            ylabel=f"{control_label} background",
+            identity=identity,
+            xlabel=f"{run_data[run]['label']} {axis_label}",
+            ylabel=f"{control_label} {axis_label}",
             title=title,
             xscale="log",
             yscale="log",
+            xlim=lim,
+            ylim=lim,
             figsize=SCATTER_FIGSIZE,
         )
-        _savefig(fig, f"{out_dir}/bin_{tag}_bg_{run_data[run]['label']}_vs_control.png")
+        fname = f"bin_{tag}_{metric}_{run_data[run]['label']}_vs_control.png"
+        _savefig(fig, f"{out_dir}/{fname}")
 
 
 def _plot_bin_scatter_vs_dials(
-    run_data, pred_lf, sel_epoch, dials_bg, d_range, label, tag, out_dir
+    run_data,
+    pred_lf,
+    sel_epoch,
+    model_col,
+    dials_col,
+    metric,
+    axis_label,
+    d_range,
+    label,
+    tag,
+    out_dir,
+    lim,
 ):
-    """Model-vs-DIALS background log scatter within the bin, per model.
+    """Model-vs-DIALS log scatter for one metric within the bin, per model.
 
     Includes the control so every source is held to the same DIALS
     reference in the bin being investigated.
@@ -895,40 +1068,56 @@ def _plot_bin_scatter_vs_dials(
                 & (pl.col("epoch") == sel_epoch[run])
                 & (pl.col("d") >= lo)
                 & (pl.col("d") < hi)
-                & (pl.col("qbg_mean") > 0)
-                & (pl.col(dials_bg) > 0)
+                & (pl.col(model_col) > 0)
+                & (pl.col(dials_col) > 0)
             )
-            .select(["qbg_mean", dials_bg])
+            .select([model_col, dials_col])
             .collect()
         )
         if df.height == 0:
             continue
-        xa = df["qbg_mean"].to_numpy()
-        yb = df[dials_bg].to_numpy()
-        pear = _corr(df, "qbg_mean", dials_bg, "pearson")
-        spear = _corr(df, "qbg_mean", dials_bg, "spearman")
+        xa = df[model_col].to_numpy()
+        yb = df[dials_col].to_numpy()
+        pear = _corr(df, model_col, dials_col, "pearson")
+        spear = _corr(df, model_col, dials_col, "spearman")
         bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
-        title = f"bin {label} bg: r={_fmt(pear)}, rho={_fmt(spear)} (n={df.height})"
+        identity = lim if lim is not None else (max(bound[0], 1e-6), bound[1])
+        title = (
+            f"bin {label} {metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={df.height})"
+        )
         fig, _ = plot_scatter_identity(
             xa,
             yb,
-            identity=(max(bound[0], 1e-6), bound[1]),
-            xlabel=f"{run_data[run]['label']} background",
-            ylabel="DIALS background",
+            identity=identity,
+            xlabel=f"{run_data[run]['label']} {axis_label}",
+            ylabel=f"DIALS {axis_label}",
             title=title,
             xscale="log",
             yscale="log",
+            xlim=lim,
+            ylim=lim,
             figsize=SCATTER_FIGSIZE,
         )
-        _savefig(fig, f"{out_dir}/bin_{tag}_bg_{run_data[run]['label']}_vs_dials.png")
+        fname = f"bin_{tag}_{metric}_{run_data[run]['label']}_vs_dials.png"
+        _savefig(fig, f"{out_dir}/{fname}")
 
 
 def _plot_bin_histogram(
-    run_data, pred_lf, sel_epoch, dials_bg, d_range, label, tag, out_dir
+    run_data,
+    pred_lf,
+    sel_epoch,
+    model_col,
+    dials_col,
+    metric,
+    axis_label,
+    d_range,
+    label,
+    tag,
+    out_dir,
 ):
-    """Overlaid per-model log-background histograms within the bin.
+    """Overlaid per-model log-value histograms for one metric within the bin.
 
-    The DIALS background distribution is overlaid as a dashed reference.
+    The DIALS distribution is overlaid as a dashed reference.
     """
     lo, hi = d_range
     palette = _get_palette(list(run_data))
@@ -941,10 +1130,10 @@ def _plot_bin_histogram(
                 & (pl.col("epoch") == sel_epoch[run])
                 & (pl.col("d") >= lo)
                 & (pl.col("d") < hi)
-                & (pl.col("qbg_mean") > 0)
+                & (pl.col(model_col) > 0)
             )
-            .select("qbg_mean")
-            .collect()["qbg_mean"]
+            .select(model_col)
+            .collect()[model_col]
             .to_numpy()
         )
         if vals.size == 0:
@@ -965,10 +1154,10 @@ def _plot_bin_histogram(
             & (pl.col("epoch") == sel_epoch[rep])
             & (pl.col("d") >= lo)
             & (pl.col("d") < hi)
-            & (pl.col(dials_bg) > 0)
+            & (pl.col(dials_col) > 0)
         )
-        .select(dials_bg)
-        .collect()[dials_bg]
+        .select(dials_col)
+        .collect()[dials_col]
         .to_numpy()
     )
     if dvals.size:
@@ -985,12 +1174,12 @@ def _plot_bin_histogram(
     if not drew:
         plt.close(fig)
         return
-    ax.set_xlabel("log10 background")
+    ax.set_xlabel(f"log10 {axis_label}")
     ax.set_ylabel("count")
-    ax.set_title(f"background distribution, bin {label}")
+    ax.set_title(f"{axis_label} distribution, bin {label}")
     ax.legend()
     ax.grid(alpha=0.3)
-    _savefig(fig, f"{out_dir}/bin_{tag}_bg_hist.png")
+    _savefig(fig, f"{out_dir}/bin_{tag}_{metric}_hist.png")
 
 
 def _dials_ref_rvalues(run_data):
