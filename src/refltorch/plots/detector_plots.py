@@ -94,6 +94,31 @@ def _shared_limits(panels, lo=1, hi=99) -> tuple[float | None, float | None]:
     return float(np.percentile(pooled, lo)), float(np.percentile(pooled, hi))
 
 
+def _grid_shape(n) -> tuple[int, int]:
+    """Pick `(nrows, ncols)` for n panels: fewest empty cells, then square.
+
+    Avoids layouts that leave trailing blank axes (e.g. 4 panels become a
+    2x2 grid, not a 2x3 grid with two empty cells). Among layouts with the
+    same number of empty cells the most square one wins, ties favoring more
+    columns (a wider, shorter grid).
+
+    Args:
+        n: Number of panels to lay out.
+
+    Returns:
+        Tuple of (nrows, ncols).
+    """
+    if n <= 0:
+        return 1, 1
+    best = None
+    for ncols in range(1, n + 1):
+        nrows = (n + ncols - 1) // ncols
+        score = (nrows * ncols - n, abs(nrows - ncols), -ncols)
+        if best is None or score < best[0]:
+            best = (score, nrows, ncols)
+    return best[1], best[2]
+
+
 def plot_hexbin_detector_grid(
     panels,
     *,
@@ -131,7 +156,8 @@ def plot_hexbin_detector_grid(
             `norm`).
         norm: Optional matplotlib norm shared by all panels; overrides
             `vmin`/`vmax`.
-        ncols: Number of columns. Defaults to `min(len(panels), 3)`.
+        ncols: Number of columns. Defaults to a near-square layout that
+            minimizes empty cells (`_grid_shape`).
         xlabel: X axis label (applied to every panel).
         ylabel: Y axis label (applied to every panel).
         clabel: Shared colorbar label.
@@ -145,8 +171,9 @@ def plot_hexbin_detector_grid(
     panels = list(panels)
     n = len(panels)
     if ncols is None:
-        ncols = min(n, 3) if n else 1
-    nrows = (n + ncols - 1) // ncols if n else 1
+        nrows, ncols = _grid_shape(n)
+    else:
+        nrows = (n + ncols - 1) // ncols if n else 1
 
     if norm is None and (vmin is None or vmax is None):
         lo, hi = _shared_limits(panels)

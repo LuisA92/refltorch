@@ -4,23 +4,29 @@
 # This script answers "what does coset inclusion change?" by comparing models
 # directly to each other and over the detector face.
 #
+# Comparisons restrict to real reflection samples (is_coset == False) so the
+# control, which has no coset samples, is held to the same basis as the coset
+# models; the coset-inclusive set is written under all_samples/ for context.
+#
 # Figures produced (saved under --save-dir):
 #   detector/detector_{stat}_{mean,median,min,max}.png: cross-model hexbin
 #       grids (one panel per model) on a shared color scale + colorbar, for
 #       model bg, model intensity, and the model-minus-DIALS residuals.
+#   detector/detector_dials_{bg,intensity}_{mean,median,min,max}.png: the
+#       (model-independent) DIALS bg/intensity over the detector.
 #   detector/detector_diff_{bg,intensity}.png: pairwise model-A-minus-model-B
 #       difference maps over the detector (shared diverging colorbar).
 #   pairs/{labelA}__vs__{labelB}.{bg,intensity}.png: model-vs-model log scatter.
 #   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d.
 #   residual_{bg,intensity}_vs_resolution.png: per-model mean residual vs d.
 #   investigate/bin_{d}_bg_*.png: focused diagnostics for the worst
-#       bg-correlation resolution bin (per-model + minus-control detector
-#       maps, model-vs-control log scatters, background histogram).
+#       bg-correlation resolution bin (per-model + DIALS detector maps,
+#       minus-control maps, model-vs-control and model-vs-DIALS log scatters,
+#       and a background histogram with the DIALS distribution overlaid).
 #   refinement_values_overlay.png: all models on one R-value axes.
 #   correlations.csv: Pearson/Spearman table.
-#   reflections_only/...: the same comparison set recomputed on reflection
-#       samples only (is_coset == False), excluding the coset-only samples
-#       that the control lacks. Written only when coset samples are present.
+#   all_samples/...: the same comparison set recomputed on every sample
+#       (coset samples included). Written only when coset samples are present.
 #
 # Reuses the same YAML config as compare_models.py (models/save_dir), plus two
 # optional keys:
@@ -58,8 +64,12 @@ from refltorch.plots import save_figure as _savefig
 from refltorch.plots import setup_mpl_config
 from refltorch.plots._shared import get_bins as _get_bins
 from refltorch.plots._shared import get_palette as _get_palette
+from refltorch.plots._shared import set_figsize as _set_figsize
 from refltorch.plots._shared import set_mpl_fonts
-from refltorch.plots.detector_plots import plot_hexbin_detector_grid
+from refltorch.plots.detector_plots import (
+    plot_hexbin_detector,
+    plot_hexbin_detector_grid,
+)
 from refltorch.plots.metric_plots import plot_binned_metric
 from refltorch.plots.refinement_plots import plot_r_values
 from refltorch.plots.scatter_plots import plot_scatter_identity
@@ -89,6 +99,10 @@ REDUCTIONS = {
     "min": np.min,
     "max": np.max,
 }
+
+# Model-vs-model scatters use a compact square size (matching the merging-stats
+# figures) so the labels stay readable instead of dominating an oversized panel.
+SCATTER_FIGSIZE = _set_figsize(fraction=0.6, ratio=1.0)
 
 
 def parse_args():
@@ -280,6 +294,8 @@ def _detector_arrays(run_data, run, pred_lf, epoch, dials_i, dials_bg, *, d_rang
         "y": y_lut[rid],
         "qbg_mean": qbg[keep],
         "qi_mean": qi[keep],
+        "dials_bg": ref_bg[keep],
+        "dials_intensity": ref_i[keep],
         "resid_bg": (qbg - ref_bg)[keep],
         "resid_intensity": (qi - ref_i)[keep],
     }
@@ -328,7 +344,34 @@ def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
             )
             _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
 
+    _plot_dials_detector(run_data, arrays, out_dir)
     _plot_detector_differences(run_data, arrays, out_dir)
+
+
+def _plot_dials_detector(run_data, arrays, out_dir):
+    """DIALS bg/intensity over the detector (one map per reduction).
+
+    The DIALS reference columns are model-independent, so a single
+    representative run (the control when present) provides the values.
+    """
+    rep = _find_control(run_data)
+    if rep not in arrays:
+        rep = next(iter(arrays))
+    a = arrays[rep]
+    for name, key, clabel in [
+        ("dials_bg", "dials_bg", "DIALS background"),
+        ("dials_intensity", "dials_intensity", "DIALS intensity"),
+    ]:
+        for red_name, red_fn in REDUCTIONS.items():
+            fig, _ = plot_hexbin_detector(
+                a["x"],
+                a["y"],
+                a[key],
+                reduce=red_fn,
+                clabel=f"{clabel} ({red_name})",
+                title=f"{clabel} over detector ({red_name})",
+            )
+            _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
 
 
 def _plot_detector_differences(run_data, arrays, out_dir):
@@ -440,6 +483,7 @@ def _plot_pairwise(run_data, pred_lf, sel_epoch, has_d, save_dir):
                 title=title,
                 xscale="log" if log_scale else "linear",
                 yscale="log" if log_scale else "linear",
+                figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
 
@@ -654,10 +698,14 @@ def _investigate_worst_bin(
             )
             for r in arrays
         ]
+        rep = control if control in arrays else next(iter(arrays))
+        panels.append(
+            ("DIALS", arrays[rep]["x"], arrays[rep]["y"], arrays[rep]["dials_bg"])
+        )
         fig, _ = plot_hexbin_detector_grid(
             panels,
-            clabel="model background (mean)",
-            suptitle=f"background over detector, bin {label}",
+            clabel="background (mean)",
+            suptitle=f"background over detector (model and DIALS), bin {label}",
         )
         _savefig(fig, f"{out_dir}/bin_{tag}_bg_detector.png")
         _plot_bin_diff_vs_control(
@@ -675,7 +723,12 @@ def _investigate_worst_bin(
         tag,
         out_dir,
     )
-    _plot_bin_histogram(run_data, pred_lf, sel_epoch, (lo, hi), label, tag, out_dir)
+    _plot_bin_scatter_vs_dials(
+        run_data, pred_lf, sel_epoch, dials_bg, (lo, hi), label, tag, out_dir
+    )
+    _plot_bin_histogram(
+        run_data, pred_lf, sel_epoch, dials_bg, (lo, hi), label, tag, out_dir
+    )
 
 
 def _plot_bin_diff_vs_control(
@@ -761,12 +814,62 @@ def _plot_bin_scatter_vs_control(
             title=title,
             xscale="log",
             yscale="log",
+            figsize=SCATTER_FIGSIZE,
         )
         _savefig(fig, f"{out_dir}/bin_{tag}_bg_{run_data[run]['label']}_vs_control.png")
 
 
-def _plot_bin_histogram(run_data, pred_lf, sel_epoch, d_range, label, tag, out_dir):
-    """Overlaid per-model log-background histograms within the bin."""
+def _plot_bin_scatter_vs_dials(
+    run_data, pred_lf, sel_epoch, dials_bg, d_range, label, tag, out_dir
+):
+    """Model-vs-DIALS background log scatter within the bin, per model.
+
+    Includes the control so every source is held to the same DIALS
+    reference in the bin being investigated.
+    """
+    lo, hi = d_range
+    for run in run_data:
+        df = (
+            pred_lf.filter(
+                (pl.col("run_id") == run)
+                & (pl.col("epoch") == sel_epoch[run])
+                & (pl.col("d") >= lo)
+                & (pl.col("d") < hi)
+                & (pl.col("qbg_mean") > 0)
+                & (pl.col(dials_bg) > 0)
+            )
+            .select(["qbg_mean", dials_bg])
+            .collect()
+        )
+        if df.height == 0:
+            continue
+        xa = df["qbg_mean"].to_numpy()
+        yb = df[dials_bg].to_numpy()
+        pear = _corr(df, "qbg_mean", dials_bg, "pearson")
+        spear = _corr(df, "qbg_mean", dials_bg, "spearman")
+        bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
+        title = f"bin {label} bg: r={_fmt(pear)}, rho={_fmt(spear)} (n={df.height})"
+        fig, _ = plot_scatter_identity(
+            xa,
+            yb,
+            identity=(max(bound[0], 1e-6), bound[1]),
+            xlabel=f"{run_data[run]['label']} background",
+            ylabel="DIALS background",
+            title=title,
+            xscale="log",
+            yscale="log",
+            figsize=SCATTER_FIGSIZE,
+        )
+        _savefig(fig, f"{out_dir}/bin_{tag}_bg_{run_data[run]['label']}_vs_dials.png")
+
+
+def _plot_bin_histogram(
+    run_data, pred_lf, sel_epoch, dials_bg, d_range, label, tag, out_dir
+):
+    """Overlaid per-model log-background histograms within the bin.
+
+    The DIALS background distribution is overlaid as a dashed reference.
+    """
     lo, hi = d_range
     palette = _get_palette(list(run_data))
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -794,10 +897,35 @@ def _plot_bin_histogram(run_data, pred_lf, sel_epoch, d_range, label, tag, out_d
             color=palette[run],
         )
         drew = True
+
+    rep = _find_control(run_data)
+    dvals = (
+        pred_lf.filter(
+            (pl.col("run_id") == rep)
+            & (pl.col("epoch") == sel_epoch[rep])
+            & (pl.col("d") >= lo)
+            & (pl.col("d") < hi)
+            & (pl.col(dials_bg) > 0)
+        )
+        .select(dials_bg)
+        .collect()[dials_bg]
+        .to_numpy()
+    )
+    if dvals.size:
+        ax.hist(
+            np.log10(dvals),
+            bins=60,
+            histtype="step",
+            label="DIALS",
+            color="black",
+            linestyle="--",
+        )
+        drew = True
+
     if not drew:
         plt.close(fig)
         return
-    ax.set_xlabel("log10 model background")
+    ax.set_xlabel("log10 background")
     ax.set_ylabel("count")
     ax.set_title(f"background distribution, bin {label}")
     ax.legend()
@@ -974,31 +1102,33 @@ def main():
     sel_epoch = _resolve_epochs(run_data, pred_lf)
     logger.info("selected epochs: %s", sel_epoch)
 
-    # All samples (coset models include their coset samples).
-    _run_comparison(
-        run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
-    )
-
-    # Reflection samples only (exclude coset samples for a fair comparison).
+    # Comparisons restrict to real reflection samples so the control (which
+    # has no coset samples) is held to the same basis as the coset models. The
+    # coset-inclusive comparison is still written under all_samples/ for
+    # context. When no run exposes coset samples both passes would be identical,
+    # so a single comparison goes straight to save_dir.
     refl_lf, n_coset = _reflections_only_lf(run_data, pred_lf)
     if refl_lf is not None:
-        logger.info(
-            "reflections-only pass: excluding %d coset samples -> %s",
-            n_coset,
-            save_dir / "reflections_only",
+        logger.info("comparing reflection samples only (dropped %d coset)", n_coset)
+        _run_comparison(
+            run_data, refl_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
         )
+        logger.info("writing coset-inclusive comparison under %s/all_samples", save_dir)
         _run_comparison(
             run_data,
-            refl_lf,
+            pred_lf,
             sel_epoch,
             dials_i,
             dials_bg,
             has_d,
             has_dials,
-            save_dir / "reflections_only",
+            save_dir / "all_samples",
         )
     else:
-        logger.info("no coset samples found; skipping reflections-only pass")
+        logger.info("no coset samples found; comparing all samples")
+        _run_comparison(
+            run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+        )
 
     _plot_rvalue_overlay(run_data, save_dir)
     logger.info("done")
