@@ -29,7 +29,10 @@
 #       model-vs-control correlation resolution bin (found separately for bg and
 #       intensity): per-model + DIALS detector maps, minus-control maps,
 #       model-vs-control and model-vs-DIALS log scatters, and a value histogram
-#       with the DIALS distribution overlaid.
+#       with the DIALS distribution overlaid. In all_samples/ the histogram also
+#       overlays a dashed reflection-only curve per coset model (so the coset
+#       contribution to the distribution is visible); the primary histogram is
+#       already reflection-only.
 #   refinement_values_overlay.png: all models on one R-value axes, with the
 #       DIALS reference R-work/R-free drawn as horizontal lines.
 #   correlations.csv: Pearson/Spearman table (model-vs-model and model-vs-DIALS).
@@ -1117,25 +1120,25 @@ def _plot_bin_histogram(
 ):
     """Overlaid per-model log-value histograms for one metric within the bin.
 
-    The DIALS distribution is overlaid as a dashed reference.
+    The DIALS distribution is overlaid as a dashed reference. When the frame
+    still contains coset samples (the all_samples pass), each coset model also
+    gets a dashed reflection-only curve so the coset contribution to the
+    distribution is visible directly; in the reflection-only pass that curve
+    would duplicate the solid one and is skipped.
     """
     lo, hi = d_range
     palette = _get_palette(list(run_data))
     fig, ax = plt.subplots(figsize=(7, 5))
     drew = False
     for run in run_data:
-        vals = (
-            pred_lf.filter(
-                (pl.col("run_id") == run)
-                & (pl.col("epoch") == sel_epoch[run])
-                & (pl.col("d") >= lo)
-                & (pl.col("d") < hi)
-                & (pl.col(model_col) > 0)
-            )
-            .select(model_col)
-            .collect()[model_col]
-            .to_numpy()
+        base = (
+            (pl.col("run_id") == run)
+            & (pl.col("epoch") == sel_epoch[run])
+            & (pl.col("d") >= lo)
+            & (pl.col("d") < hi)
+            & (pl.col(model_col) > 0)
         )
+        vals = pred_lf.filter(base).select(model_col).collect()[model_col].to_numpy()
         if vals.size == 0:
             continue
         ax.hist(
@@ -1146,6 +1149,26 @@ def _plot_bin_histogram(
             color=palette[run],
         )
         drew = True
+
+        mask = load_coset_mask(run_data[run], override=run_data[run].get("metadata"))
+        if mask is not None and mask.any():
+            coset_ids = pl.Series(np.flatnonzero(mask).astype(np.float32))
+            refl_vals = (
+                pred_lf.filter(base & ~pl.col("refl_ids").is_in(coset_ids))
+                .select(model_col)
+                .collect()[model_col]
+                .to_numpy()
+            )
+            # Only when coset samples were actually removed (all_samples pass).
+            if 0 < refl_vals.size < vals.size:
+                ax.hist(
+                    np.log10(refl_vals),
+                    bins=60,
+                    histtype="step",
+                    linestyle="--",
+                    label=f"{run_data[run]['label']} (refl only)",
+                    color=palette[run],
+                )
 
     rep = _find_control(run_data)
     dvals = (
