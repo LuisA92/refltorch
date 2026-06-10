@@ -268,28 +268,35 @@ def _pooled_log_limits(
         hi: Upper percentile (0-100).
         pad: Multiplicative breathing room applied to each end.
         d_range: Optional `(lo, hi)` resolution window (keeps `lo <= d < hi`).
+
+    Each (run, column) percentile is collected separately, selecting just that
+    one column for that run's epoch, so the query reads minimal data instead of
+    materializing a pooled concatenation of every value. The pooled range is
+    then min(lo)/max(hi) over runs and columns.
     """
-    parts = []
+    los, his = [], []
     for run in run_data:
         flt = (pl.col("run_id") == run) & (pl.col("epoch") == sel_epoch[run])
         if d_range is not None:
             lo_d, hi_d = d_range
             flt = flt & (pl.col("d") >= lo_d) & (pl.col("d") < hi_d)
-        base = pred_lf.filter(flt)
         for c in cols:
-            parts.append(base.select(pl.col(c).alias("v")))
-    res = (
-        pl.concat(parts)
-        .filter(pl.col("v") > 0)
-        .select(
-            pl.col("v").quantile(lo / 100).alias("lo"),
-            pl.col("v").quantile(hi / 100).alias("hi"),
-        )
-        .collect()
-    )
-    if res.height == 0 or res["lo"][0] is None or res["hi"][0] is None:
+            res = (
+                pred_lf.filter(flt)
+                .select(pl.col(c).alias("v"))
+                .filter(pl.col("v") > 0)
+                .select(
+                    pl.col("v").quantile(lo / 100).alias("lo"),
+                    pl.col("v").quantile(hi / 100).alias("hi"),
+                )
+                .collect()
+            )
+            if res.height and res["lo"][0] is not None and res["hi"][0] is not None:
+                los.append(float(res["lo"][0]))
+                his.append(float(res["hi"][0]))
+    if not los:
         return None
-    return float(res["lo"][0]) / pad, float(res["hi"][0]) * pad
+    return min(los) / pad, max(his) * pad
 
 
 def _corr(df, a, b, method) -> float | None:
@@ -1304,8 +1311,15 @@ def _reflections_only_lf(run_data, pred_lf):
         Tuple of (filtered_lf, n_coset) where n_coset is the total number of
         coset rows dropped, or (None, 0) if no run exposes any coset samples
         (so the filter would be a no-op).
+
+    The filter is a pure per-run predicate, not a join: `merge_coset` appends
+    cosets after the lattice reflections, so `is_coset` is exactly
+    `refl_ids >= n_lattice`. Using a threshold (rather than joining a per-row
+    is_coset map) keeps predicate/projection pushdown intact, so every
+    downstream collect reads only its epoch's columns instead of the whole
+    multi-epoch dataset (the join blocked pushdown and blew up memory).
     """
-    maps = []
+    keep = None
     n_coset = 0
     for run in run_data:
         label = run_data[run]["label"]
@@ -1325,25 +1339,19 @@ def _reflections_only_lf(run_data, pred_lf):
             continue
         logger.info("run %s (%s): filtering out %d coset samples", run, label, n)
         n_coset += n
-        maps.append(
-            pl.DataFrame(
-                {
-                    "run_id": run,
-                    "refl_ids": np.arange(len(mask), dtype=np.float32),
-                    "_is_coset": mask,
-                }
-            )
-        )
-    if not maps:
+        thr = int(np.argmax(mask))  # first coset index (lattice comes first)
+        if mask[:thr].any() or not mask[thr:].all():
+            # Non-contiguous mask (not the merge_coset layout): fall back to an
+            # explicit id set. Heavier, but correctness over the threshold.
+            coset_ids = pl.Series(np.flatnonzero(mask).astype(np.float32))
+            drop = (pl.col("run_id") == run) & pl.col("refl_ids").is_in(coset_ids)
+        else:
+            drop = (pl.col("run_id") == run) & (pl.col("refl_ids") >= float(thr))
+        keep = ~drop if keep is None else keep & ~drop
+    if keep is None:
         return None, 0
 
-    map_df = pl.concat(maps).lazy()
-    filtered = (
-        pred_lf.join(map_df, on=["run_id", "refl_ids"], how="left")
-        .filter(~pl.col("_is_coset").fill_null(False))
-        .drop("_is_coset")
-    )
-    return filtered, n_coset
+    return pred_lf.filter(keep), n_coset
 
 
 def _run_comparison(
