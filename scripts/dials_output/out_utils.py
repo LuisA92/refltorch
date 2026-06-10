@@ -25,6 +25,10 @@ from refltorch.tools import get_reference_metadata
 
 logger = logging.getLogger(__name__)
 
+# Cache of resolved metadata.pt path -> loaded metadata dict; all models
+# usually share one metadata.pt, so this loads it once.
+_META_CACHE = {}
+
 INTENSITY_EDGES = [0, 10, 25, 50, 100, 300, 600, 1000, 1500, 2500, 5000, 10000]
 DIALS_EDGES_9B7C = [
     0,
@@ -225,6 +229,20 @@ def _find_metadata_pt(run, override=None) -> Path | None:
     return None
 
 
+def _load_meta(path):
+    """Load (and cache) a `metadata.pt` dict, or None if torch is missing."""
+    key = str(path)
+    if key in _META_CACHE:
+        return _META_CACHE[key]
+    try:
+        import torch
+    except ImportError:
+        logger.warning("torch not available; cannot load metadata.pt")
+        return None
+    _META_CACHE[key] = torch.load(path, map_location="cpu", weights_only=False)
+    return _META_CACHE[key]
+
+
 def load_detector_positions(run, *, override=None):
     """Load detector x/y lookup arrays for a run, indexed by `refl_ids`.
 
@@ -239,19 +257,37 @@ def load_detector_positions(run, *, override=None):
         Tuple of (x_lut, y_lut) numpy arrays indexable by integer
         `refl_ids`, or None if no `metadata.pt` is found.
     """
-    try:
-        import torch
-    except ImportError:
-        logger.warning("torch not available; cannot load detector positions")
-        return None
-
     path = _find_metadata_pt(run, override)
     if path is None:
         return None
-    meta = torch.load(path, map_location="cpu", weights_only=False)
-    x = np.asarray(meta["xyzcal.px.0"])
-    y = np.asarray(meta["xyzcal.px.1"])
-    return x, y
+    meta = _load_meta(path)
+    if meta is None:
+        return None
+    return np.asarray(meta["xyzcal.px.0"]), np.asarray(meta["xyzcal.px.1"])
+
+
+def load_coset_mask(run, *, override=None):
+    """Load the `is_coset` flag for a run, indexed by `refl_ids`.
+
+    Coset models (see `refltorch.cli.merge_coset`) carry extra coset samples
+    that are not real reflections; `is_coset` is True for those entries. The
+    control has none. Use this to restrict comparisons to reflection samples.
+
+    Args:
+        run: A `run_data` entry (uses its `metadata`/`data_dir` keys).
+        override: Optional explicit `metadata.pt` path, taking precedence.
+
+    Returns:
+        Boolean numpy array indexable by integer `refl_ids` (True = coset
+        sample), or None if no `metadata.pt` or no `is_coset` field is found.
+    """
+    path = _find_metadata_pt(run, override)
+    if path is None:
+        return None
+    meta = _load_meta(path)
+    if meta is None or "is_coset" not in meta:
+        return None
+    return np.asarray(meta["is_coset"]).astype(bool)
 
 
 def resolve_dials_cols(columns) -> tuple[str, str]:
