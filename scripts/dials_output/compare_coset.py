@@ -29,7 +29,8 @@
 #       bg-correlation resolution bin (per-model + DIALS detector maps,
 #       minus-control maps, model-vs-control and model-vs-DIALS log scatters,
 #       and a background histogram with the DIALS distribution overlaid).
-#   refinement_values_overlay.png: all models on one R-value axes.
+#   refinement_values_overlay.png: all models on one R-value axes, with the
+#       DIALS reference R-work/R-free drawn as horizontal lines.
 #   correlations.csv: Pearson/Spearman table (model-vs-model and model-vs-DIALS).
 #   all_samples/...: the same comparison set recomputed on every sample
 #       (coset samples included). Written only when coset samples are present;
@@ -992,8 +993,33 @@ def _plot_bin_histogram(
     _savefig(fig, f"{out_dir}/bin_{tag}_bg_hist.png")
 
 
+def _dials_ref_rvalues(run_data):
+    """Parse the DIALS reference final R-values from a run's output config.
+
+    All models share one DIALS reference, so the first run's training config
+    `output.phenix_refine_log` is used. Returns the `parse_phenix_r_values`
+    dict (with `r_work_final`/`r_free_final`), or None if unavailable.
+    """
+    first = next(iter(run_data.values()))
+    try:
+        cfg = load_config(first["run_cfg"]["config"])
+        ref_log = cfg["output"]["phenix_refine_log"]
+    except (KeyError, FileNotFoundError, TypeError, OSError):
+        return None
+    if ref_log is None or not Path(ref_log).exists():
+        logger.warning("DIALS phenix_refine_log not found; no DIALS line in overlay")
+        return None
+    try:
+        return parse_phenix_r_values(ref_log)
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def _plot_rvalue_overlay(run_data, save_dir):
-    """Overlay every model's final R-work/R-free on a single axes."""
+    """Overlay every model's final R-work/R-free on a single axes.
+
+    The DIALS reference R-work/R-free are drawn as horizontal lines.
+    """
     dfs = []
     for run in run_data:
         logs = run_data[run]["phenix_logs"]
@@ -1035,7 +1061,10 @@ def _plot_rvalue_overlay(run_data, save_dir):
     )
     palette = _get_palette(long_df["Label"].unique().to_list())
     fig, _ = plot_r_values(
-        long_df, palette=palette, title="R-values (final) across models"
+        long_df,
+        palette=palette,
+        ref_vals=_dials_ref_rvalues(run_data),
+        title="R-values (final) across models",
     )
     _savefig(fig, f"{save_dir}/refinement_values_overlay.png")
 
