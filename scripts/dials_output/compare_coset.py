@@ -246,57 +246,19 @@ def _symmetric_limit(values, hi=99) -> tuple[float | None, float | None]:
     return -v, v
 
 
-def _pooled_log_limits(
-    run_data, pred_lf, sel_epoch, cols, *, lo=0.5, hi=99.5, pad=1.3, d_range=None
-) -> tuple[float, float] | None:
-    """Shared robust (min, max) log-axis limits pooled over `cols` across runs.
+def _log_limits(values, pad=1.3) -> tuple[float, float] | None:
+    """Per-axis (min/pad, max*pad) over positive values for a log axis.
 
-    Pools the positive values of every column in `cols` over all runs (and,
-    optionally, a resolution window) and returns padded `lo`/`hi` percentile
-    limits. Applying one such range to every scatter of a metric gives all the
-    panels identical axes, so they can be read side by side; robust percentiles
-    keep extreme outliers (e.g. a DIALS intensity tail near 1e-6) from blowing
-    the range out into blank space. Returns None if there are no positive
-    values.
-
-    Args:
-        run_data: The run_data mapping.
-        pred_lf: Combined predictions LazyFrame.
-        sel_epoch: Mapping from run id to its selected epoch.
-        cols: Columns whose pooled values set the range (model and/or DIALS).
-        lo: Lower percentile (0-100).
-        hi: Upper percentile (0-100).
-        pad: Multiplicative breathing room applied to each end.
-        d_range: Optional `(lo, hi)` resolution window (keeps `lo <= d < hi`).
-
-    Each (run, column) percentile is collected separately, selecting just that
-    one column for that run's epoch, so the query reads minimal data instead of
-    materializing a pooled concatenation of every value. The pooled range is
-    then min(lo)/max(hi) over runs and columns.
+    Clamps an axis to its own data range (with a little breathing room) so a
+    model-vs-DIALS scatter does not leave blank space when the two axes span
+    very different ranges (e.g. DIALS intensity reaching far lower than the
+    model's), or None if there are no positive values.
     """
-    los, his = [], []
-    for run in run_data:
-        flt = (pl.col("run_id") == run) & (pl.col("epoch") == sel_epoch[run])
-        if d_range is not None:
-            lo_d, hi_d = d_range
-            flt = flt & (pl.col("d") >= lo_d) & (pl.col("d") < hi_d)
-        for c in cols:
-            res = (
-                pred_lf.filter(flt)
-                .select(pl.col(c).alias("v"))
-                .filter(pl.col("v") > 0)
-                .select(
-                    pl.col("v").quantile(lo / 100).alias("lo"),
-                    pl.col("v").quantile(hi / 100).alias("hi"),
-                )
-                .collect()
-            )
-            if res.height and res["lo"][0] is not None and res["hi"][0] is not None:
-                los.append(float(res["lo"][0]))
-                his.append(float(res["hi"][0]))
-    if not los:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[arr > 0]
+    if arr.size == 0:
         return None
-    return min(los) / pad, max(his) * pad
+    return float(arr.min() / pad), float(arr.max() * pad)
 
 
 def _corr(df, a, b, method) -> float | None:
@@ -480,15 +442,6 @@ def _plot_pairwise(
     runs = list(run_data)
     corr_by_bin = {"qbg_mean": {}, "qi_mean": {}}
 
-    # Shared per-metric axis range (pooled over all models and DIALS) so every
-    # scatter of a metric uses identical xlim/ylim and reads side by side.
-    bg_cols = ["qbg_mean"] + ([dials_bg] if has_dials else [])
-    i_cols = ["qi_mean"] + ([dials_i] if has_dials else [])
-    share = {
-        "qbg_mean": _pooled_log_limits(run_data, pred_lf, sel_epoch, bg_cols),
-        "qi_mean": _pooled_log_limits(run_data, pred_lf, sel_epoch, i_cols),
-    }
-
     for run_a, run_b in itertools.combinations(runs, 2):
         label_a = run_data[run_a]["label"]
         label_b = run_data[run_b]["label"]
@@ -532,22 +485,18 @@ def _plot_pairwise(
             yb = sdf[col_b].to_numpy()
             if xa.size == 0:
                 continue
-            lim = share[key]
-            lo_pt = max(float(min(xa.min(), yb.min())), 1e-6) if log_scale else 0.0
-            hi_pt = float(max(xa.max(), yb.max()))
-            identity = lim if lim is not None else (lo_pt, hi_pt)
+            hi = float(max(xa.max(), yb.max()))
+            lo = float(min(xa.min(), yb.min())) if log_scale else 0.0
             title = f"{metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={sdf.height})"
             fig, _ = plot_scatter_identity(
                 xa,
                 yb,
-                identity=identity,
+                identity=(max(lo, 1e-6) if log_scale else lo, hi),
                 xlabel=f"{label_a} {ax_label}",
                 ylabel=f"{label_b} {ax_label}",
                 title=title,
                 xscale="log" if log_scale else "linear",
                 yscale="log" if log_scale else "linear",
-                xlim=lim,
-                ylim=lim,
                 figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
@@ -565,7 +514,6 @@ def _plot_pairwise(
             dials_i,
             dials_bg,
             corr_by_bin,
-            share,
         )
 
     if has_d:
@@ -574,7 +522,7 @@ def _plot_pairwise(
 
 
 def _dials_pairs(
-    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin, share
+    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
 ):
     """Per-model model-vs-DIALS bg/intensity log scatters and per-bin corr.
 
@@ -606,22 +554,20 @@ def _dials_pairs(
             yb = sdf[dcol].to_numpy()
             if xa.size == 0:
                 continue
-            lim = share[mcol]
             lo = max(float(min(xa.min(), yb.min())), 1e-6)
             hi = float(max(xa.max(), yb.max()))
-            identity = lim if lim is not None else (lo, hi)
             title = f"{metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={sdf.height})"
             fig, _ = plot_scatter_identity(
                 xa,
                 yb,
-                identity=identity,
+                identity=(lo, hi),
                 xlabel=f"{label} {ax_label}",
                 ylabel=f"DIALS {ax_label}",
                 title=title,
                 xscale="log",
                 yscale="log",
-                xlim=lim,
-                ylim=lim,
+                xlim=_log_limits(xa),
+                ylim=_log_limits(yb),
                 figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
@@ -885,11 +831,6 @@ def _investigate_worst_bin(
                 out_dir,
             )
 
-        # Shared axis range over the in-bin model and DIALS values so the
-        # vs-control and vs-DIALS scatters for this metric share identical axes.
-        bin_share = _pooled_log_limits(
-            run_data, pred_lf, sel_epoch, [model_col, ref_col], d_range=(lo, hi)
-        )
         _plot_bin_scatter_vs_control(
             run_data,
             pred_lf,
@@ -903,7 +844,6 @@ def _investigate_worst_bin(
             label,
             tag,
             out_dir,
-            bin_share,
         )
         _plot_bin_scatter_vs_dials(
             run_data,
@@ -917,7 +857,6 @@ def _investigate_worst_bin(
             label,
             tag,
             out_dir,
-            bin_share,
         )
         _plot_bin_histogram(
             run_data,
@@ -1001,7 +940,6 @@ def _plot_bin_scatter_vs_control(
     label,
     tag,
     out_dir,
-    lim,
 ):
     """Model-vs-control log scatter for one metric within the bin, per model."""
     lo, hi = d_range
@@ -1029,7 +967,6 @@ def _plot_bin_scatter_vs_control(
         pear = _corr(joined, col_a, col_b, "pearson")
         spear = _corr(joined, col_a, col_b, "spearman")
         bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
-        identity = lim if lim is not None else (max(bound[0], 1e-6), bound[1])
         title = (
             f"bin {label} {metric}: r={_fmt(pear)}, rho={_fmt(spear)} "
             f"(n={joined.height})"
@@ -1037,14 +974,12 @@ def _plot_bin_scatter_vs_control(
         fig, _ = plot_scatter_identity(
             xa,
             yb,
-            identity=identity,
+            identity=(max(bound[0], 1e-6), bound[1]),
             xlabel=f"{run_data[run]['label']} {axis_label}",
             ylabel=f"{control_label} {axis_label}",
             title=title,
             xscale="log",
             yscale="log",
-            xlim=lim,
-            ylim=lim,
             figsize=SCATTER_FIGSIZE,
         )
         fname = f"bin_{tag}_{metric}_{run_data[run]['label']}_vs_control.png"
@@ -1063,7 +998,6 @@ def _plot_bin_scatter_vs_dials(
     label,
     tag,
     out_dir,
-    lim,
 ):
     """Model-vs-DIALS log scatter for one metric within the bin, per model.
 
@@ -1091,21 +1025,20 @@ def _plot_bin_scatter_vs_dials(
         pear = _corr(df, model_col, dials_col, "pearson")
         spear = _corr(df, model_col, dials_col, "spearman")
         bound = (float(min(xa.min(), yb.min())), float(max(xa.max(), yb.max())))
-        identity = lim if lim is not None else (max(bound[0], 1e-6), bound[1])
         title = (
             f"bin {label} {metric}: r={_fmt(pear)}, rho={_fmt(spear)} (n={df.height})"
         )
         fig, _ = plot_scatter_identity(
             xa,
             yb,
-            identity=identity,
+            identity=(max(bound[0], 1e-6), bound[1]),
             xlabel=f"{run_data[run]['label']} {axis_label}",
             ylabel=f"DIALS {axis_label}",
             title=title,
             xscale="log",
             yscale="log",
-            xlim=lim,
-            ylim=lim,
+            xlim=_log_limits(xa),
+            ylim=_log_limits(yb),
             figsize=SCATTER_FIGSIZE,
         )
         fname = f"bin_{tag}_{metric}_{run_data[run]['label']}_vs_dials.png"
