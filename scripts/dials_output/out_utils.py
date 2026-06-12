@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 # usually share one metadata.pt, so this loads it once.
 _META_CACHE = {}
 
+# Cache of resolved counts.pt path -> loaded shoebox tensor (memory-mapped).
+_COUNTS_CACHE = {}
+
 INTENSITY_EDGES = [0, 10, 25, 50, 100, 300, 600, 1000, 1500, 2500, 5000, 10000]
 DIALS_EDGES_9B7C = [
     0,
@@ -159,6 +162,58 @@ def _resolve_metadata_path(run_cfg) -> Path | None:
     return data_dir / ref_name
 
 
+def _resolve_counts_path(run_cfg) -> Path | None:
+    """Resolve a run's `counts.pt` (observed shoeboxes) from its config.
+
+    The filename comes from `data_loader.args.shoebox_file_names.counts`
+    (default `counts.pt`) under the dataset directory.
+
+    Args:
+        run_cfg: Parsed `run_metadata.yaml` (has a `config` path key).
+
+    Returns:
+        The full `counts.pt` path, or None if it cannot be resolved.
+    """
+    data_dir = _resolve_data_dir(run_cfg)
+    if data_dir is None:
+        return None
+    counts_name = "counts.pt"
+    try:
+        cfg = load_config(run_cfg["config"])
+        sbox = cfg["data_loader"]["args"].get("shoebox_file_names") or {}
+        counts_name = sbox.get("counts") or "counts.pt"
+    except (KeyError, FileNotFoundError, TypeError, OSError):
+        pass
+    return data_dir / counts_name
+
+
+def resolve_shoebox_shape(run_cfg) -> tuple | None:
+    """Resolve a run's shoebox `(D, H, W)` shape from its training config.
+
+    Reads `data_loader.args.D/H/W` (the integrator convention), falling back
+    to `global_vars.d/h/w`.
+
+    Args:
+        run_cfg: Parsed `run_metadata.yaml` (has a `config` path key).
+
+    Returns:
+        The `(D, H, W)` tuple, or None if it cannot be read.
+    """
+    try:
+        cfg = load_config(run_cfg["config"])
+    except (KeyError, FileNotFoundError, TypeError, OSError):
+        return None
+    args = (cfg.get("data_loader") or {}).get("args") or {}
+    d, h, w = args.get("D"), args.get("H"), args.get("W")
+    if d is not None and h is not None and w is not None:
+        return (int(d), int(h), int(w))
+    gv = cfg.get("global_vars") or {}
+    d, h, w = gv.get("d"), gv.get("h"), gv.get("w")
+    if d is not None and h is not None and w is not None:
+        return (int(d), int(h), int(w))
+    return None
+
+
 def assemble_run_data(models) -> dict:
     """Assemble per-run paths and metadata for the comparison scripts.
 
@@ -241,6 +296,45 @@ def _load_meta(path):
         return None
     _META_CACHE[key] = torch.load(path, map_location="cpu", weights_only=False)
     return _META_CACHE[key]
+
+
+def load_counts(run, *, override=None):
+    """Load (and cache) a run's `counts.pt` shoebox tensor, indexed by `refl_ids`.
+
+    Observed shoeboxes are not in the prediction parquets; they live in
+    `counts.pt` (a flat `(N, D*H*W)` tensor) under the dataset directory and
+    are indexed by the integer `refl_ids`. The tensor is memory-mapped so that
+    grabbing a handful of rows does not read the whole (often multi-GB) file
+    into memory.
+
+    Args:
+        run: A `run_data` entry (uses its `run_cfg`/`data_dir` keys).
+        override: Optional explicit `counts.pt` path, taking precedence.
+
+    Returns:
+        The counts tensor, or None if it cannot be found or torch is missing.
+    """
+    path = override or _resolve_counts_path(run["run_cfg"])
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.exists():
+        logger.warning("counts.pt not found at %s", path)
+        return None
+    key = str(path)
+    if key in _COUNTS_CACHE:
+        return _COUNTS_CACHE[key]
+    try:
+        import torch
+    except ImportError:
+        logger.warning("torch not available; cannot load counts.pt")
+        return None
+    try:
+        counts = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    except (TypeError, RuntimeError):
+        counts = torch.load(path, map_location="cpu", weights_only=False)
+    _COUNTS_CACHE[key] = counts
+    return counts
 
 
 def load_detector_positions(run, *, override=None):

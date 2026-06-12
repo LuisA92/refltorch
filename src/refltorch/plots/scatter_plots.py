@@ -40,8 +40,12 @@ def plot_scatter_identity(
         title: Optional axis title.
         xscale: X axis scale (`linear`, `log`, or `symlog`).
         yscale: Y axis scale (`linear`, `log`, or `symlog`).
-        xlim: Optional `(left, right)` x limits, applied before scaling.
-        ylim: Optional `(bottom, top)` y limits, applied before scaling.
+        xlim: Optional `(left, right)` x limits, applied after the scale is
+            set so a None bound autoscales on the final axis. Either bound may
+            be None to leave that side automatic.
+        ylim: Optional `(bottom, top)` y limits, applied after the scale is
+            set so a None bound autoscales on the final axis. Either bound may
+            be None to leave that side automatic.
         figsize: Figure size in inches.
         color: Marker color.
         alpha: Marker alpha.
@@ -64,13 +68,13 @@ def plot_scatter_identity(
         ax.set_xlabel(xlabel)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
-    if xlim is not None:
-        ax.set_xlim(*xlim)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
     if xscale != "linear":
         ax.set_xscale(xscale)
     if yscale != "linear":
         ax.set_yscale(yscale)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.grid(True, alpha=grid_alpha)
     return fig, ax

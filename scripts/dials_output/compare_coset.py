@@ -20,6 +20,10 @@
 #       (model - DIALS) do not (DIALS minus DIALS is zero).
 #   detector/detector_diff_{bg,intensity}.png: pairwise model-A-minus-model-B
 #       difference maps over the detector (shared diverging colorbar).
+#   detector/detector_resid_vs_control_{bg,intensity}_{mean,median,min,max}.png:
+#       per-model (model - control) detector residual grids, the control
+#       analogue of the model - DIALS residual grids (shared diverging
+#       colorbar; the control panel is omitted).
 #   pairs/{labelA}__vs__{labelB}.{bg,intensity}.png: model-vs-model log scatter.
 #   pairs/{label}__vs__DIALS.{bg,intensity}.png: model-vs-DIALS log scatter.
 #   pairs/corr_{bg,intensity}_vs_resolution.png: per-pair correlation vs d, one
@@ -33,6 +37,11 @@
 #       overlays a dashed reflection-only curve per coset model (so the coset
 #       contribution to the distribution is visible); the primary histogram is
 #       already reflection-only.
+#   shoeboxes/disagree_{metric}_{label}_vs_control.png: for the reflections
+#       where a model most disagrees with the control on {metric} (background by
+#       default), a grid with one column per reflection: observed shoebox
+#       (middle slice), the model's profile, and the control's profile. Reads
+#       counts.pt for observations and the qp_mean column for profiles.
 #   refinement_values_overlay.png: all models on one R-value axes, with the
 #       DIALS reference R-work/R-free drawn as horizontal lines.
 #   correlations.csv: Pearson/Spearman table (model-vs-model and model-vs-DIALS).
@@ -40,11 +49,26 @@
 #       (coset samples included). Written only when coset samples are present;
 #       the primary save_dir set is reflection-only (cosets filtered out).
 #
-# Reuses the same YAML config as compare_models.py (models/save_dir), plus two
+# Reuses the same YAML config as compare_models.py (models/save_dir), plus these
 # optional keys:
 #   models[].epoch:    pin a checkpoint for that model (default: last).
 #   models[].metadata: path to metadata.pt for detector x/y (default: auto from
 #                      the run's data_dir). A top-level `metadata:` applies to all.
+#   scatter:           per-metric x-limits for the log scatters, keyed by metric
+#                      (`intensity` and/or `background`), each with optional
+#                      `xmin`/`xmax`. Unset bounds keep the auto-computed value.
+#                      Example:
+#                          scatter:
+#                            intensity: {xmin: 0.5, xmax: 50000}
+#                            background: {xmin: 0.01, xmax: 100}
+#   shoeboxes:         the model-vs-control shoebox disagreement figures.
+#                      Keys (all optional): enabled (default true), n (default
+#                      12), metric (`background` default, or `intensity`),
+#                      profile_col (default `qp_mean`), shape (D H W override).
+#                      Example:
+#                          shoeboxes:
+#                            n: 16
+#                            metric: background
 #
 #   uv run python scripts/dials_output/compare_coset.py --config models.yaml
 
@@ -66,8 +90,10 @@ from out_utils import (
     assemble_run_data,
     join_models_on_refl,
     load_coset_mask,
+    load_counts,
     load_detector_positions,
     resolve_dials_cols,
+    resolve_shoebox_shape,
 )
 
 from refltorch.cli.utils import setup_logging
@@ -82,6 +108,7 @@ from refltorch.plots.detector_plots import plot_hexbin_detector_grid
 from refltorch.plots.metric_plots import plot_binned_metric
 from refltorch.plots.refinement_plots import plot_r_values
 from refltorch.plots.scatter_plots import plot_scatter_identity
+from refltorch.plots.shoebox_plots import plot_shoebox_grid
 from refltorch.tools import parse_phenix_r_values
 
 logger = logging.getLogger(__name__)
@@ -153,17 +180,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def _resolve_models(args) -> tuple[list[dict], str | None]:
+def _resolve_models(args) -> tuple[list[dict], str | None, dict, dict]:
     """Resolve the models to compare from --config or --run-dirs.
 
     Mirrors `compare_models._resolve_models` but also carries the optional
-    per-model `epoch` and `metadata` keys (and a top-level `metadata`).
+    per-model `epoch` and `metadata` keys (and a top-level `metadata`), plus
+    the optional top-level `scatter` x-limit and `shoeboxes` blocks.
 
     Args:
         args: Parsed CLI arguments.
 
     Returns:
-        Tuple of (models, save_dir).
+        Tuple of (models, save_dir, scatter_limits, shoebox_cfg).
+        `scatter_limits` is the per-metric x-limit mapping (empty when not
+        configured); `shoebox_cfg` holds the disagreement-figure settings.
     """
     if args.config is not None:
         if args.run_dirs is not None:
@@ -185,7 +215,12 @@ def _resolve_models(args) -> tuple[list[dict], str | None]:
                     "metadata": entry.get("metadata", top_meta),
                 }
             )
-        return models, cfg.get("save_dir", args.save_dir)
+        return (
+            models,
+            cfg.get("save_dir", args.save_dir),
+            _parse_scatter_limits(cfg),
+            _parse_shoebox_cfg(cfg),
+        )
 
     if not args.run_dirs:
         raise ValueError("Provide either --config or --run-dirs")
@@ -199,7 +234,7 @@ def _resolve_models(args) -> tuple[list[dict], str | None]:
         }
         for rd in args.run_dirs
     ]
-    return models, args.save_dir
+    return models, args.save_dir, {}, _parse_shoebox_cfg({})
 
 
 def _resolve_epochs(run_data, pred_lf) -> dict:
@@ -259,6 +294,100 @@ def _log_limits(values, pad=1.3) -> tuple[float, float] | None:
     if arr.size == 0:
         return None
     return float(arr.min() / pad), float(arr.max() * pad)
+
+
+# Config `scatter` block metric keys -> the internal metric tags ("bg"/
+# "intensity") used by the scatter loops. Both the readable and short forms
+# are accepted.
+_SCATTER_METRIC_ALIASES = {
+    "background": "bg",
+    "bg": "bg",
+    "intensity": "intensity",
+}
+
+
+def _parse_scatter_limits(cfg) -> dict:
+    """Parse the optional `scatter` config block into per-metric x-limits.
+
+    The block is keyed by metric (`intensity` and/or `background`/`bg`), each
+    mapping to an `xmin`/`xmax` pair (either may be omitted). Metrics with
+    neither bound set are dropped.
+
+    Args:
+        cfg: The parsed YAML config dict.
+
+    Returns:
+        Mapping from internal metric tag (`bg`/`intensity`) to an
+        `(xmin, xmax)` tuple, with either entry possibly None.
+    """
+    raw = cfg.get("scatter") or {}
+    limits = {}
+    for metric_key, block in raw.items():
+        metric = _SCATTER_METRIC_ALIASES.get(str(metric_key).lower())
+        if metric is None or not block:
+            continue
+        xmin = block.get("xmin")
+        xmax = block.get("xmax")
+        if xmin is None and xmax is None:
+            continue
+        limits[metric] = (xmin, xmax)
+    return limits
+
+
+def _parse_shoebox_cfg(cfg) -> dict:
+    """Parse the optional `shoeboxes` config block (with defaults).
+
+    Controls the model-vs-control shoebox disagreement figures. All keys are
+    optional:
+      enabled:     run the diagnostic at all (default True).
+      n:           reflections per figure (default 12).
+      metric:      `background` (default) or `intensity` to rank disagreements.
+      profile_col: prediction column holding the profile (default `qp_mean`).
+      shape:       shoebox `(D, H, W)` override; resolved from the run config
+                   when omitted.
+
+    Args:
+        cfg: The parsed YAML config dict.
+
+    Returns:
+        A settings dict with `enabled`, `n`, `metric`, `profile_col`, `shape`.
+    """
+    raw = cfg.get("shoeboxes") or {}
+    shape = raw.get("shape")
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "n": int(raw.get("n", 12)),
+        "metric": raw.get("metric", "background"),
+        "profile_col": raw.get("profile_col", "qp_mean"),
+        "shape": tuple(shape) if shape else None,
+    }
+
+
+def _scatter_xlim(scatter_limits, metric, *, fallback=None):
+    """Resolve a metric's scatter x-limits from config, else the fallback.
+
+    A configured bound overrides the corresponding fallback bound; an unset
+    bound keeps the fallback (auto-computed) value.
+
+    Args:
+        scatter_limits: Mapping from metric tag to `(xmin, xmax)`, or None.
+        metric: Internal metric tag (`bg`/`intensity`).
+        fallback: Optional auto-computed `(xmin, xmax)` for this axis.
+
+    Returns:
+        An `(xmin, xmax)` tuple (either entry possibly None for auto), or None
+        when neither config nor fallback constrains the axis.
+    """
+    cfg = (scatter_limits or {}).get(metric)
+    if cfg is None:
+        return fallback
+    cmin, cmax = cfg
+    fmin, fmax = fallback if fallback is not None else (None, None)
+    xmin = cmin if cmin is not None else fmin
+    xmax = cmax if cmax is not None else fmax
+    if xmin is None and xmax is None:
+        return None
+    return (xmin, xmax)
 
 
 def _corr(df, a, b, method) -> float | None:
@@ -380,6 +509,75 @@ def _plot_detector(run_data, pred_lf, sel_epoch, dials_i, dials_bg, save_dir):
             _savefig(fig, f"{out_dir}/detector_{name}_{red_name}.png")
 
     _plot_detector_differences(run_data, arrays, out_dir)
+    _plot_detector_residual_vs_control(run_data, arrays, out_dir)
+
+
+def _plot_detector_residual_vs_control(run_data, arrays, out_dir):
+    """Per-model (model - control) detector residual grids, shared colorbar.
+
+    The control analogue of the model - DIALS residual grids built in
+    `_plot_detector` (the `resid_bg`/`resid_intensity` stats): each panel is a
+    non-control model minus the control over the detector, aligned on
+    `refl_ids`, on a shared symmetric diverging color scale. One grid per
+    (metric, reduction). The control panel is omitted (control minus control is
+    zero), mirroring how the DIALS residual grids omit a DIALS panel.
+    """
+    control = _find_control(run_data)
+    if control not in arrays:
+        logger.warning(
+            "control run not in detector arrays; skipping model-control residuals"
+        )
+        return
+    control_label = run_data[control]["label"]
+
+    for metric_name, key in [("bg", "qbg_mean"), ("intensity", "qi_mean")]:
+        cref = pl.DataFrame(
+            {"refl_ids": arrays[control]["refl_ids"], "vc": arrays[control][key]}
+        )
+        merged_by_run = {}
+        for run, arr in arrays.items():
+            if run == control:
+                continue
+            merged = pl.DataFrame(
+                {
+                    "refl_ids": arr["refl_ids"],
+                    "va": arr[key],
+                    "x": arr["x"],
+                    "y": arr["y"],
+                }
+            ).join(cref, on="refl_ids", how="inner")
+            if merged.height:
+                merged_by_run[run] = merged
+        if not merged_by_run:
+            continue
+
+        for red_name, red_fn in REDUCTIONS.items():
+            panels = [
+                (
+                    f"{run_data[run]['label']} - {control_label}",
+                    merged["x"].to_numpy(),
+                    merged["y"].to_numpy(),
+                    (merged["va"] - merged["vc"]).to_numpy(),
+                )
+                for run, merged in merged_by_run.items()
+            ]
+            vmin, vmax = _symmetric_limit(np.concatenate([p[3] for p in panels]))
+            fig, _ = plot_hexbin_detector_grid(
+                panels,
+                reduce=red_fn,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                clabel=f"model - {control_label} {metric_name} ({red_name})",
+                suptitle=(
+                    f"model - {control_label} {metric_name} over detector "
+                    f"({red_name})"
+                ),
+            )
+            _savefig(
+                fig,
+                f"{out_dir}/detector_resid_vs_control_{metric_name}_{red_name}.png",
+            )
 
 
 def _plot_detector_differences(run_data, arrays, out_dir):
@@ -422,7 +620,16 @@ def _plot_detector_differences(run_data, arrays, out_dir):
 
 
 def _plot_pairwise(
-    run_data, pred_lf, sel_epoch, has_d, save_dir, *, dials_i, dials_bg, has_dials
+    run_data,
+    pred_lf,
+    sel_epoch,
+    has_d,
+    save_dir,
+    *,
+    dials_i,
+    dials_bg,
+    has_dials,
+    scatter_limits=None,
 ):
     """All-pairwise model-vs-model (and model-vs-DIALS) scatters and corr table.
 
@@ -497,6 +704,7 @@ def _plot_pairwise(
                 title=title,
                 xscale="log" if log_scale else "linear",
                 yscale="log" if log_scale else "linear",
+                xlim=_scatter_xlim(scatter_limits, metric),
                 figsize=SCATTER_FIGSIZE,
             )
             _savefig(fig, f"{out_dir}/{pair_id}.{metric}.png")
@@ -514,6 +722,7 @@ def _plot_pairwise(
             dials_i,
             dials_bg,
             corr_by_bin,
+            scatter_limits=scatter_limits,
         )
 
     if has_d:
@@ -522,7 +731,16 @@ def _plot_pairwise(
 
 
 def _dials_pairs(
-    run_data, pred_lf, sel_epoch, has_d, out_dir, dials_i, dials_bg, corr_by_bin
+    run_data,
+    pred_lf,
+    sel_epoch,
+    has_d,
+    out_dir,
+    dials_i,
+    dials_bg,
+    corr_by_bin,
+    *,
+    scatter_limits=None,
 ):
     """Per-model model-vs-DIALS bg/intensity log scatters and per-bin corr.
 
@@ -566,7 +784,7 @@ def _dials_pairs(
                 title=title,
                 xscale="log",
                 yscale="log",
-                xlim=_log_limits(xa),
+                xlim=_scatter_xlim(scatter_limits, metric, fallback=_log_limits(xa)),
                 ylim=_log_limits(yb),
                 figsize=SCATTER_FIGSIZE,
             )
@@ -751,7 +969,15 @@ INVESTIGATE_METRICS = [
 
 
 def _investigate_worst_bin(
-    run_data, pred_lf, sel_epoch, dials_i, dials_bg, corr_by_bin, save_dir
+    run_data,
+    pred_lf,
+    sel_epoch,
+    dials_i,
+    dials_bg,
+    corr_by_bin,
+    save_dir,
+    *,
+    scatter_limits=None,
 ):
     """Drill into the worst-correlation resolution bin vs the control.
 
@@ -844,6 +1070,7 @@ def _investigate_worst_bin(
             label,
             tag,
             out_dir,
+            scatter_limits=scatter_limits,
         )
         _plot_bin_scatter_vs_dials(
             run_data,
@@ -857,6 +1084,7 @@ def _investigate_worst_bin(
             label,
             tag,
             out_dir,
+            scatter_limits=scatter_limits,
         )
         _plot_bin_histogram(
             run_data,
@@ -940,6 +1168,8 @@ def _plot_bin_scatter_vs_control(
     label,
     tag,
     out_dir,
+    *,
+    scatter_limits=None,
 ):
     """Model-vs-control log scatter for one metric within the bin, per model."""
     lo, hi = d_range
@@ -980,6 +1210,7 @@ def _plot_bin_scatter_vs_control(
             title=title,
             xscale="log",
             yscale="log",
+            xlim=_scatter_xlim(scatter_limits, metric),
             figsize=SCATTER_FIGSIZE,
         )
         fname = f"bin_{tag}_{metric}_{run_data[run]['label']}_vs_control.png"
@@ -998,6 +1229,8 @@ def _plot_bin_scatter_vs_dials(
     label,
     tag,
     out_dir,
+    *,
+    scatter_limits=None,
 ):
     """Model-vs-DIALS log scatter for one metric within the bin, per model.
 
@@ -1037,7 +1270,7 @@ def _plot_bin_scatter_vs_dials(
             title=title,
             xscale="log",
             yscale="log",
-            xlim=_log_limits(xa),
+            xlim=_scatter_xlim(scatter_limits, metric, fallback=_log_limits(xa)),
             ylim=_log_limits(yb),
             figsize=SCATTER_FIGSIZE,
         )
@@ -1143,6 +1376,162 @@ def _plot_bin_histogram(
     ax.legend()
     ax.grid(alpha=0.3)
     _savefig(fig, f"{out_dir}/bin_{tag}_{metric}_hist.png")
+
+
+def _fetch_profiles(pred_lf, run, epoch, refl_ids, profile_col) -> dict:
+    """Fetch profile vectors for specific `refl_ids` of one run, keyed by id.
+
+    Pulls only the requested reflections (predicate pushdown on `refl_ids`) so
+    the heavy profile column is never materialized for the whole dataset.
+
+    Args:
+        pred_lf: Combined predictions LazyFrame with `run_id`/`epoch`.
+        run: Run id to read.
+        epoch: Epoch selected for this run.
+        refl_ids: Reflection ids to fetch.
+        profile_col: Profile column name (e.g. `qp_mean`).
+
+    Returns:
+        Mapping from int `refl_ids` to its profile vector (a Python list).
+    """
+    ids = [int(i) for i in refl_ids]
+    sub = (
+        pred_lf.filter((pl.col("run_id") == run) & (pl.col("epoch") == epoch))
+        .select(pl.col("refl_ids").cast(pl.Int64).alias("refl_ids"), pl.col(profile_col))
+        .filter(pl.col("refl_ids").is_in(ids))
+        .collect()
+    )
+    return dict(zip(sub["refl_ids"].to_list(), sub[profile_col].to_list()))
+
+
+def _profile_shape(vec_len, shape):
+    """Shape a flat profile of length `vec_len` reshapes to, given shoebox shape.
+
+    A profile spanning the full shoebox uses `shape`; an `(H, W)` profile over
+    a 3D shoebox uses the trailing two dims; otherwise a square grid is tried.
+    """
+    if shape is not None:
+        if vec_len == int(np.prod(shape)):
+            return tuple(shape)
+        if len(shape) == 3 and vec_len == int(np.prod(shape[-2:])):
+            return tuple(shape[-2:])
+    side = int(round(vec_len**0.5))
+    if side * side == vec_len:
+        return (side, side)
+    return shape
+
+
+def _plot_shoebox_disagreements(run_data, pred_lf, sel_epoch, save_dir, *, shoebox_cfg):
+    """Shoebox views of the reflections where models most disagree with control.
+
+    For the configured metric (background by default), ranks reflections by the
+    model-vs-control log-ratio and, for the top `n`, draws a grid with one
+    column per reflection: the observed shoebox (middle slice), the model's
+    profile, and the control's profile. This localizes why the two models
+    disagree on a reflection (e.g. signal absorbed into background vs profile).
+
+    Reads observed shoeboxes from the dataset's `counts.pt` and profiles from
+    the predictions' profile column; skips gracefully when either is absent.
+    """
+    metric_cols = {"background": "qbg_mean", "intensity": "qi_mean"}
+    metric = shoebox_cfg["metric"]
+    if metric not in metric_cols:
+        logger.warning("unknown shoebox metric %r; skipping disagreements", metric)
+        return
+    model_col = metric_cols[metric]
+    profile_col = shoebox_cfg["profile_col"]
+    n = shoebox_cfg["n"]
+
+    if profile_col not in pred_lf.collect_schema().names():
+        logger.warning(
+            "no %s column in predictions; skipping shoebox disagreements", profile_col
+        )
+        return
+
+    control = _find_control(run_data)
+    control_label = run_data[control]["label"]
+    counts = load_counts(run_data[control])
+    if counts is None:
+        logger.warning("no counts.pt for control; skipping shoebox disagreements")
+        return
+    n_counts = counts.shape[0]
+    shape = shoebox_cfg["shape"] or resolve_shoebox_shape(run_data[control]["run_cfg"])
+
+    out_dir = save_dir / "shoeboxes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for run in run_data:
+        if run == control:
+            continue
+        label = run_data[run]["label"]
+
+        # Pass 1: cheap scalar join to rank disagreements (no profiles yet).
+        joined = join_models_on_refl(
+            pred_lf,
+            run,
+            sel_epoch[run],
+            control,
+            sel_epoch[control],
+            value_cols=[model_col],
+        )
+        col_a, col_b = f"{model_col}_a", f"{model_col}_b"
+        ranked = (
+            joined.filter((pl.col(col_a) > 0) & (pl.col(col_b) > 0))
+            .with_columns(
+                (pl.col(col_a).log10() - pl.col(col_b).log10()).abs().alias("logdiff")
+            )
+            .sort("logdiff", descending=True)
+            .head(n)
+        )
+        if ranked.height == 0:
+            logger.warning(
+                "no positive %s disagreements for %s vs %s",
+                metric,
+                label,
+                control_label,
+            )
+            continue
+        refl_ids = ranked["refl_ids"].to_numpy().astype(np.int64)
+
+        # Pass 2: fetch profiles only for the selected reflections.
+        prof_model = _fetch_profiles(
+            pred_lf, run, sel_epoch[run], refl_ids, profile_col
+        )
+        prof_ctrl = _fetch_profiles(
+            pred_lf, control, sel_epoch[control], refl_ids, profile_col
+        )
+
+        ids, obs, pm, pc = [], [], [], []
+        for rid in refl_ids:
+            if rid >= n_counts or rid not in prof_model or rid not in prof_ctrl:
+                continue
+            ids.append(int(rid))
+            obs.append(counts[int(rid)])
+            pm.append(np.asarray(prof_model[rid], dtype=float))
+            pc.append(np.asarray(prof_ctrl[rid], dtype=float))
+        if not ids:
+            logger.warning(
+                "no profiles found for %s-vs-%s disagreements", label, control_label
+            )
+            continue
+
+        prof_shape = _profile_shape(pm[0].size, shape)
+        fig, _ = plot_shoebox_grid(
+            [obs, pm, pc],
+            row_shapes=[shape, prof_shape, prof_shape],
+            row_labels=["observation", f"{label} profile", f"{control_label} profile"],
+            col_labels=[str(i) for i in ids],
+            cmaps=["viridis", "magma", "magma"],
+            share_scale="row",
+            nan_value=-1,
+            suptitle=(
+                f"{metric}: top {len(ids)} {label}-vs-{control_label} disagreements"
+            ),
+        )
+        _savefig(fig, f"{out_dir}/disagree_{metric}_{label}_vs_{control_label}.png")
+        logger.info(
+            "wrote %d %s-vs-%s shoebox disagreements", len(ids), label, control_label
+        )
 
 
 def _dials_ref_rvalues(run_data):
@@ -1288,13 +1677,23 @@ def _reflections_only_lf(run_data, pred_lf):
 
 
 def _run_comparison(
-    run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+    run_data,
+    pred_lf,
+    sel_epoch,
+    dials_i,
+    dials_bg,
+    has_d,
+    has_dials,
+    save_dir,
+    *,
+    scatter_limits=None,
 ):
     """Run the full model-vs-model comparison on a predictions frame.
 
     Writes detector grids, pairwise scatters/correlations, residual and
     correlation vs resolution, the worst-bin investigation, and a
-    correlations.csv under `save_dir`.
+    correlations.csv under `save_dir`. `scatter_limits` maps each metric to an
+    optional `(xmin, xmax)` for the log scatters' x-axis.
     """
     save_dir.mkdir(parents=True, exist_ok=True)
     corr_rows = []
@@ -1312,6 +1711,7 @@ def _run_comparison(
         dials_i=dials_i,
         dials_bg=dials_bg,
         has_dials=has_dials,
+        scatter_limits=scatter_limits,
     )
     corr_rows += pairwise_rows
 
@@ -1329,6 +1729,7 @@ def _run_comparison(
                 dials_bg,
                 corr_by_bin,
                 save_dir,
+                scatter_limits=scatter_limits,
             )
 
     if corr_rows:
@@ -1340,7 +1741,7 @@ def main():
     args = parse_args()
     setup_logging(args.verbose)
 
-    models, save_dir_arg = _resolve_models(args)
+    models, save_dir_arg, scatter_limits, shoebox_cfg = _resolve_models(args)
     run_data = assemble_run_data(models)
 
     first = next(iter(run_data.values()))
@@ -1372,7 +1773,15 @@ def main():
     if refl_lf is not None:
         logger.info("comparing reflection samples only (dropped %d coset)", n_coset)
         _run_comparison(
-            run_data, refl_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+            run_data,
+            refl_lf,
+            sel_epoch,
+            dials_i,
+            dials_bg,
+            has_d,
+            has_dials,
+            save_dir,
+            scatter_limits=scatter_limits,
         )
         logger.info("writing coset-inclusive comparison under %s/all_samples", save_dir)
         _run_comparison(
@@ -1384,11 +1793,28 @@ def main():
             has_d,
             has_dials,
             save_dir / "all_samples",
+            scatter_limits=scatter_limits,
         )
     else:
         logger.info("no coset samples found; comparing all samples")
         _run_comparison(
-            run_data, pred_lf, sel_epoch, dials_i, dials_bg, has_d, has_dials, save_dir
+            run_data,
+            pred_lf,
+            sel_epoch,
+            dials_i,
+            dials_bg,
+            has_d,
+            has_dials,
+            save_dir,
+            scatter_limits=scatter_limits,
+        )
+
+    if shoebox_cfg["enabled"]:
+        # Reflection-only frame so the control (no coset samples) is held to the
+        # same basis as the coset models when ranking disagreements.
+        frame = refl_lf if refl_lf is not None else pred_lf
+        _plot_shoebox_disagreements(
+            run_data, frame, sel_epoch, save_dir, shoebox_cfg=shoebox_cfg
         )
 
     _plot_rvalue_overlay(run_data, save_dir)
